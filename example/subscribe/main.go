@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+
 	// Connect to the message broker
 	conn, err := net.Dial("tcp", "localhost:9999")
 	if err != nil {
