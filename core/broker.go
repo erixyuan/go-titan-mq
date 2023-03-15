@@ -19,14 +19,12 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 
 */
 
-// Message represents a message in the message queue
 type Message struct {
 	MessageNo string
 	Topic     string
 	Payload   string
 }
 
-// Broker manages the message queue and handles client requests
 type Broker struct {
 	clients        map[net.Conn]bool
 	subscribers    map[string][]net.Conn
@@ -37,7 +35,6 @@ type Broker struct {
 	commitLogMutex sync.Mutex
 }
 
-// NewBroker creates a new message broker
 func NewBroker() *Broker {
 	return &Broker{
 		clients:     make(map[net.Conn]bool),
@@ -48,7 +45,6 @@ func NewBroker() *Broker {
 	}
 }
 
-// Start starts the broker and listens for client requests
 func (b *Broker) Start(port int) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -70,7 +66,6 @@ func (b *Broker) Start(port int) error {
 	}
 }
 
-// Broadcast sends a message to all subscribers of a topic
 func (b *Broker) Broadcast(msg Message) {
 	// 消息落地
 	b.storeMsgToCommitLog(&msg)
@@ -148,7 +143,7 @@ func (b *Broker) createTopicCommitLogFile(topic string) *os.File {
 		file, err = os.Create(filePath)
 		if err != nil {
 			fmt.Println("Failed to create file:", err)
-			if file, err = os.OpenFile(fmt.Sprintf("%s.log", topic), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
+			if file, err = os.OpenFile(fmt.Sprintf(filePath, topic), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
 				fmt.Println("Failed to get file:", err)
 			} else {
 				b.commitLog[topic] = file
