@@ -23,3 +23,5 @@ gentry-core-data-service
 .vscode
 nohup.log
 pid
+*.log
+*.topic
