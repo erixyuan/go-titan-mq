@@ -42,8 +42,8 @@ func NewBroker() *Broker {
 	return &Broker{
 		clients:     make(map[net.Conn]bool),
 		subscribers: make(map[string][]net.Conn),
-		messages:    make(chan Message, 10),
-		queue:       make(map[string]chan Message, 10),
+		messages:    make(chan Message),
+		queue:       make(map[string]chan Message),
 		commitLog:   make(map[string]*os.File),
 	}
 }
@@ -86,17 +86,33 @@ func (b *Broker) sendMessage(conn net.Conn, msg Message) {
 }
 
 func (b *Broker) AddQueue(msg Message) {
-	b.queue[msg.Topic] <- msg
+	log.Printf("%s消息加入[topic:%s]队列", msg.MessageNo, msg.Topic)
+	go func(msg Message) {
+		topic := msg.Topic
+		if _, ok := b.queue[topic]; !ok {
+			log.Printf("[topic:%s]不存在", topic)
+			return
+		}
+		b.queue[topic] <- msg
+	}(msg)
 }
 
 // 独立的消息发送
 func (b *Broker) PublishHandler(topic string) {
+	if _, ok := b.queue[topic]; !ok {
+		b.queue[topic] = make(chan Message)
+	}
 	go func() {
-		log.Printf("启动topic：%s的消息发送channel", topic)
-		select {
-		case msg := <-b.queue[topic]:
-			for _, conn := range b.subscribers[msg.Topic] {
-				b.sendMessage(conn, msg)
+		log.Printf("监听[topic：%s]中的消息", topic)
+		for {
+			select {
+			case msg := <-b.queue[topic]:
+				log.Printf("收到消息%+v", msg)
+				for _, conn := range b.subscribers[msg.Topic] {
+					go b.sendMessage(conn, msg)
+				}
+				//default:
+				//	log.Printf("没有收到消息")
 			}
 		}
 	}()
@@ -106,6 +122,13 @@ func (b *Broker) PublishHandler(topic string) {
 func (b *Broker) Subscribe(topic string, conn net.Conn) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
+
+	// 如果是topic 不存在，开启对应topic的回调channel
+	if _, ok := b.subscribers[topic]; !ok {
+		b.PublishHandler(topic)
+	}
+
+	// 订阅队列中添加客户端连接
 	b.subscribers[topic] = append(b.subscribers[topic], conn)
 
 	// 如果topic对应的文件不存在，就新建，并且
@@ -117,7 +140,7 @@ func (b *Broker) Subscribe(topic string, conn net.Conn) {
 func (b *Broker) createTopicCommitLogFile(topic string) *os.File {
 	b.commitLogMutex.Lock()
 	defer b.commitLogMutex.Unlock()
-	filePath := fmt.Sprintf("%s.log", topic)
+	filePath := fmt.Sprintf("%s.topic", topic)
 	_, err := os.Stat(filePath)
 	var file *os.File
 	if os.IsNotExist(err) {

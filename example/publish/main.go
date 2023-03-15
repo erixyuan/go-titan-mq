@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/core"
+	"log"
 	"net"
 	"os"
 	"time"
@@ -27,9 +28,11 @@ func main() {
 		s, _ := json.Marshal(message)
 		b := string(s)
 		// 发送带有结尾符号的的消息
+		log.Println(b)
 		fmt.Fprintln(conn, b)
 		count += 1
 		time.Sleep(time.Second)
+		//break
 	}
 
 }
