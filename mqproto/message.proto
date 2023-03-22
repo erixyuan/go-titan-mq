@@ -1,0 +1,80 @@
+syntax = "proto3";
+option go_package = "../protocol";
+
+package proto;
+
+
+enum RemotingCommandType{
+    RequestCommand = 0;
+    ResponseCommand = 1;
+}
+
+enum OpaqueType {
+    Subscription = 0;
+    Unsubscription = 1;
+    Publish = 2;
+    PullMessage = 3;
+}
+
+message RemotingCommandHeader{
+    // 请求码
+    int32 code = 1;
+    // 操作码
+    OpaqueType Opaque  = 2;
+    // 标识位
+    int32 Flag = 3;
+    // 备注信息
+    string remark = 4;
+}
+
+
+message RemotingCommand{
+    RemotingCommandType type =1;
+    RemotingCommandHeader header =2;
+    bytes body =3;
+}
+
+message SubscriptionRequestData {
+    // 订阅的 Topic
+    string  topic = 1;
+    string clientId = 2;
+    string consumerGroup = 3;
+}
+message SubscriptionResponseData {
+    // 订阅的 Topic
+    string  topic = 1;
+    string clientId = 2;
+    string consumerGroup = 3;
+}
+
+message PullMessageRequestData {
+    string clientId = 1;
+    string topic = 2;
+    string consumerGroup = 3;
+    int32 pullSize = 4;
+}
+
+message PullMessageResponseData {
+    string topic =1;
+    string consumerGroup = 2;
+    int32 size = 3;
+    repeated Message messages = 4;
+}
+
+message Message {
+    // 主题
+    string topic = 1;
+    // 消息内容
+    bytes body = 3;
+    // 生产时间戳
+    int64 bornTimestamp = 4;
+    // 存储时间戳
+    int64 storeTimestamp = 5;
+    // 消息ID
+    string msgId = 6;
+    // 生产者组
+    string producerGroup = 7;
+    // 消费者组
+    string consumerGroup = 8;
+}
+
