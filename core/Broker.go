@@ -191,7 +191,6 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 	for i := 0; i < int(pullSize); i++ {
 		select {
 		case message := <-queueChannel:
-			log.Printf("采集到一条数据 %+v", message)
 			responseData.Messages = append(responseData.Messages, &message)
 		case <-time.After(10 * time.Second):
 			fmt.Println("Timeout, returning partial response.")
@@ -201,6 +200,8 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 
 	responseData.Size = int32(len(responseData.Messages))
 	if bytes, err := proto.Marshal(&responseData); err != nil {
+		log.Printf("PullMessageHandler error: %v", err)
+	} else {
 		remotingCommand := protocol.RemotingCommand{
 			Type: protocol.RemotingCommandType_ResponseCommand,
 			Header: &protocol.RemotingCommandHeader{
@@ -220,7 +221,6 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 				log.Printf("返回拉数据的结果成功, 数量为 %d", responseData.Size)
 			}
 		}
-
 	}
 
 }

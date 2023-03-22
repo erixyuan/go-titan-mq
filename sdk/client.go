@@ -45,7 +45,7 @@ func (t *TitanConsumerClient) SetTimeout(timeout int) {
 	t.timeout = time.Duration(timeout) * time.Second
 }
 
-func (t *TitanConsumerClient) Connect() error {
+func (t *TitanConsumerClient) Start() error {
 	log.Printf("开始连接地址：%s", t.address)
 	conn, err := net.DialTimeout("tcp", t.address, t.timeout)
 	if err != nil {
@@ -63,12 +63,14 @@ func (t *TitanConsumerClient) Connect() error {
 		t.accept()
 		t.acceptIsOpen = true
 	}
-
+	if err = t.Subscribe(); err != nil {
+		log.Fatalf("订阅失败")
+	}
 	return nil
 }
 
 // 订阅
-func (t *TitanConsumerClient) Subscribe(topic string, f func(core.Message)) error {
+func (t *TitanConsumerClient) Subscribe() error {
 	command := protocol.RemotingCommand{
 		Type: protocol.RemotingCommandType_RequestCommand,
 		Header: &protocol.RemotingCommandHeader{
@@ -138,11 +140,12 @@ func (t *TitanConsumerClient) accept() {
 					for {
 						fmt.Println("Connection closed:", err)
 						fmt.Println("Connection retry:")
-						if err = t.Connect(); err != nil {
+						if err = t.Start(); err != nil {
 							log.Printf("Connection retry: error %+v", err)
 						} else {
 							break
 						}
+						time.Sleep(time.Second * 3)
 					}
 				}
 			} else {
