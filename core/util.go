@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func GenerateSerialNumber() string {
+func GenerateSerialNumber(prefix string) string {
 	// 获取当前日期时间，格式为 YYYYMMDDHHMMSS
 	now := time.Now().Format("20060102150405")
 
