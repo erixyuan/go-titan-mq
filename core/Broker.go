@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -127,7 +128,7 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 			ClientID:      clientId,
 			LastHeartbeat: time.Now(),
 			Status:        1,
-			Queue:         thisTopic.queues[rand.Intn(len(thisTopic.queues))],
+			Queue:         thisTopic.queues[rand.Intn(len(thisTopic.queues))], // 随机分配队列
 		}
 		consumerGroup.Clients[clientId] = &client
 		log.Printf("订阅成功 %+v", client)
@@ -282,6 +283,35 @@ func (b *Broker) ProducerMessage() {
 		}
 		count += 1
 	}
+}
+
+/**
+通过offset读取文件，然后发给消费者
+*/
+func (b *Broker) readCommitLogByOffset(offset int64) {
+	// 打开文件
+	fileName := "largefile.txt"
+	file, err := os.Open(fileName)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	// 设置文件偏移量
+	whence := io.SeekStart
+	pos, err := file.Seek(offset, whence)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("当前文件偏移量：%d\n", pos)
+	// 读取文件数据
+	buf := make([]byte, 1024)
+	n, err := file.Read(buf)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("实际读取的字节数：%d\n", n)
+	fmt.Printf("读取的文件数据：%s\n", string(buf[:n]))
+
 }
 
 //
