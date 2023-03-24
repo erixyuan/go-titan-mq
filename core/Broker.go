@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
@@ -311,6 +312,60 @@ func (b *Broker) readCommitLogByOffset(offset int64) {
 	}
 	fmt.Printf("实际读取的字节数：%d\n", n)
 	fmt.Printf("读取的文件数据：%s\n", string(buf[:n]))
+
+}
+
+/**
+用二分查找法，找到对应的消息
+*/
+func (b *Broker) readConsumeQueueByOffset(consumeQueueFilePath string, messageOffset int64) {
+	// 打开消费进度文件
+	file, err := os.Open(consumeQueueFilePath)
+	if err != nil {
+		fmt.Printf("Failed to open consume queue file: %v\n", err)
+		return
+	}
+	defer file.Close()
+	// 二分查找消息偏移量
+	var left, right, mid int64
+	fileInfo, _ := file.Stat()
+	fileSize := fileInfo.Size()
+	left = 0
+	right = fileSize/20 - 1 // 计算消息条目数量
+	for left <= right {
+		mid = (left + right) / 2
+		messageOffsetPos := mid * 20
+		messageOffsetBytes := make([]byte, 8)
+		if _, err := file.ReadAt(messageOffsetBytes, messageOffsetPos+4); err != nil {
+			fmt.Printf("Failed to read message offset from consume queue file: %v\n", err)
+			return
+		}
+		curMessageOffset := int64(binary.BigEndian.Uint64(messageOffsetBytes))
+		if curMessageOffset < messageOffset {
+			left = mid + 1
+		} else if curMessageOffset > messageOffset {
+			right = mid - 1
+		} else {
+			// 找到消息
+			consumeStatusBytes := make([]byte, 1)
+			if _, err := file.ReadAt(consumeStatusBytes, messageOffsetPos+16); err != nil {
+				fmt.Printf("Failed to read consume status from consume queue file: %v\n", err)
+				return
+			}
+			consumeStatus := consumeStatusBytes[0]
+			fmt.Printf("Message offset %v consume status is %v\n", messageOffset, consumeStatus)
+			return
+		}
+	}
+	fmt.Printf("Message offset %v not found in consume queue file\n", messageOffset)
+}
+
+/**
+consume queue 文件，是topic 维度，一个topic一个文件
+当收到
+写入
+*/
+func (b *Broker) writeConsumeQueueByOffset() {
 
 }
 

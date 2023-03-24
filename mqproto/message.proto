@@ -76,5 +76,9 @@ message Message {
     string producerGroup = 7;
     // 消费者组
     string consumerGroup = 8;
+    // 队列ID
+    int32 queueId = 9;
+    // 队列offset
+    int64 queueOffset = 10;
 }
 
