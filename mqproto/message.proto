@@ -52,6 +52,8 @@ message PullMessageRequestData {
     string topic = 2;
     string consumerGroup = 3;
     int32 pullSize = 4;
+    int32 queueId = 5;
+    int64 offset = 6;
 }
 
 message PullMessageResponseData {
