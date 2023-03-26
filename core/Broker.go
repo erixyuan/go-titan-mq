@@ -1,7 +1,11 @@
 package core
 
 import (
+	"bufio"
+	"context"
+	"crypto/md5"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
@@ -23,26 +27,32 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 
 */
 
+var (
+	ErrMessageNotFound = errors.New("找不到消息")
+	ErrMessageNotYet   = errors.New("还没有消息")
+)
+
 type Broker struct {
 	clients            map[net.Conn]bool
-	commitLog          map[string]*os.File
 	topics             map[string]*Topic
 	topicsLock         sync.Mutex
 	consumerGroupLock  sync.Mutex
 	consumerClientLock sync.Mutex
 	commitLogMutex     sync.Mutex
+	CommitLog          *CommitLog
+	topicsFile         *os.File
 }
 
 func NewBroker() *Broker {
-	return &Broker{
+	broker := Broker{
 		clients:            make(map[net.Conn]bool),
-		commitLog:          make(map[string]*os.File),
 		topics:             make(map[string]*Topic),
 		topicsLock:         sync.Mutex{},
 		consumerGroupLock:  sync.Mutex{},
 		consumerClientLock: sync.Mutex{},
 		commitLogMutex:     sync.Mutex{},
 	}
+	return &broker
 }
 
 func (b *Broker) Start(port int) error {
@@ -52,7 +62,9 @@ func (b *Broker) Start(port int) error {
 	}
 	defer listener.Close()
 
-	fmt.Printf("Broker listening on port %d\n", port)
+	fmt.Printf("Broker 开始初始化................................")
+	b.init()
+	fmt.Printf("Broker 开始初始化监听端口 port %d\n", port)
 
 	for {
 		conn, err := listener.Accept()
@@ -63,7 +75,7 @@ func (b *Broker) Start(port int) error {
 		fmt.Println("New client connected:", conn.RemoteAddr())
 
 		go b.ListeningClient(conn)
-		go b.ProducerMessage()
+		//go b.ProducerMessage()
 	}
 }
 
@@ -171,6 +183,8 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 找到对应的channel，进行读取
 */
 func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	data := &protocol.PullMessageRequestData{}
 	if err := proto.Unmarshal(body, data); err != nil {
 		log.Printf("SubscribeHandler error: %v", err)
@@ -180,25 +194,71 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 	clientId := data.ClientId
 	consumerGroupName := data.ConsumerGroup
 	pullSize := data.PullSize
+	queueId := data.QueueId
+	offset := data.Offset
 
 	// 找到之前分配的channel
-	queueChannel := b.topics[topic].consumerGroups[consumerGroupName].Clients[clientId].Queue
+	consumeQueue := b.topics[topic].ConsumeQueues[queueId]
 
 	// 构建返回数据
 	responseData := protocol.PullMessageResponseData{}
 	responseData.Topic = topic
 	responseData.ConsumerGroup = consumerGroupName
 	responseData.Messages = make([]*protocol.Message, 0)
-	log.Printf("ClientId: %s 要拉取 %d 条数据, 开始监听chanel %+v", clientId, pullSize, queueChannel)
-	for i := 0; i < int(pullSize); i++ {
+	log.Printf("ClientId: %s 要拉取 %d 条数据, 开始监听chanel %+v", clientId, pullSize, consumeQueue)
+
+	fetchDataChanDone := make(chan struct{})
+	go func() {
+		targetOffset := offset + int64(pullSize)
+		for {
+			if offset >= targetOffset {
+				fetchDataChanDone <- struct{}{}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				fmt.Println("协程拉取时间超时，准备退出")
+				return
+			default:
+				if consumeQueueIndex, err := consumeQueue.read(offset); err != nil {
+					if errors.Is(err, ErrMessageNotYet) {
+						// 如果没有找到消息，等待一秒
+						log.Printf("暂时还没有消息，等待1秒")
+						time.Sleep(time.Second)
+						continue
+					} else {
+						log.Printf("PullMessageHandler error %+v", err)
+						return
+					}
+				} else {
+					log.Printf("已经获得commitLogOffset为%d, 准备读取commitLog的消息", consumeQueueIndex.commitLogOffset)
+					if message, err := b.CommitLog.ReadMessage(consumeQueueIndex.commitLogOffset); err != nil {
+						log.Printf("读取CommitLog文件异常 error: %+v", err)
+						return
+					} else {
+						fmt.Println("PullMessageHandler 获取到了数据,msgId:", message.MsgId)
+						consumeQueue.messageChan <- message
+						offset += 1
+					}
+				}
+
+			}
+		}
+
+	}()
+	for {
 		select {
-		case message := <-queueChannel:
-			responseData.Messages = append(responseData.Messages, &message)
-		case <-time.After(10 * time.Second):
-			fmt.Println("Timeout, returning partial response.")
-			break
+		case message := <-consumeQueue.messageChan:
+			log.Printf("开始组转消息， msgId: %s, QueueOffset:%d", message.MsgId, message.QueueOffset)
+			responseData.Messages = append(responseData.Messages, message)
+		case <-fetchDataChanDone:
+			goto ReturnPullMessageData
+		case <-ctx.Done():
+			fmt.Println("拉取时间到，准备返回")
+			goto ReturnPullMessageData
 		}
 	}
+ReturnPullMessageData:
 
 	responseData.Size = int32(len(responseData.Messages))
 	if bytes, err := proto.Marshal(&responseData); err != nil {
@@ -214,6 +274,7 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 			},
 			Body: bytes,
 		}
+		log.Printf("responseData md5:%d", md5.Sum(bytes))
 		if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
 			log.Printf("PullMessageHandler error: %v", err)
 		} else {
@@ -224,23 +285,19 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 			}
 		}
 	}
-
 }
 
 func (b *Broker) GetTopic(topicName string) *Topic {
 	b.topicsLock.Lock()
 	defer b.topicsLock.Unlock()
 	if t, ok := b.topics[topicName]; !ok {
-		m1 := make(map[string]*ConsumerGroup)
-		m2 := make(map[string]*ProducerGroup)
-		q := make([]chan protocol.Message, 0)
-		q = append(q, make(chan protocol.Message, 10))
-		b.topics[topicName] = &Topic{
-			topicName:      topicName,
-			consumerGroups: m1,
-			producerGroups: m2,
-			queues:         q, // 默认3个队列
+		topic := NewTopic(topicName)
+		b.topics[topicName] = topic
+		_, err := b.topicsFile.Write([]byte(topicName))
+		if err != nil {
+			log.Fatal("写入topic文件异常 err: ", err)
 		}
+		b.topicsFile.Sync()
 		return b.topics[topicName]
 	} else {
 		return t
@@ -264,26 +321,31 @@ func (b *Broker) GetTopicConsumerGroup(gname string, topic *Topic) *ConsumerGrou
 	return nil
 }
 
-func (b *Broker) ProducerMessage() {
-	count := 1
-	for {
-		time.Sleep(time.Second)
-		for name, topic := range b.topics {
-			intn := rand.Intn(len(topic.queues))
-			messagesCh := topic.queues[intn]
-			log.Printf("开始生产消息 topic:%s, 队列长度: %d, ch: %+v", topic.topicName, len(topic.queues), messagesCh)
-			messagesCh <- protocol.Message{
-				Topic:          name,
-				Body:           []byte(fmt.Sprintf("这是来自queue%d的消息", intn)),
-				BornTimestamp:  0,
-				StoreTimestamp: 0,
-				MsgId:          GenerateSerialNumber("M"),
-				ProducerGroup:  "GID-P-01",
-				ConsumerGroup:  "GID-C-01",
-			}
-		}
-		count += 1
+// 生产者只管往某个主题生产消息
+func (b *Broker) ProducerMessage(msg *protocol.Message) error {
+	// 根据消息的主题，选择队列
+	topicName := msg.Topic
+	topic := b.GetTopic(topicName)
+	// tod 随机选择队列
+	randQueueId := rand.Intn(len(topic.ConsumeQueues))
+	consumeQueue := topic.ConsumeQueues[randQueueId]
+	// todo 这里要计算消息的长度
+	bodyBytes, err := proto.Marshal(msg)
+	if err != nil {
+		return err
 	}
+	if queueOffset, err := consumeQueue.write(b.CommitLog.currentOffset, int32(len(bodyBytes)), 1); err != nil {
+		log.Fatal("ProducerMessage error: ", err)
+	} else {
+		msg.QueueOffset = queueOffset
+		if commitLogOffset, err := b.CommitLog.WriteMessage(msg); err != nil {
+			log.Fatal("ProducerMessage error: ", err)
+		} else {
+			log.Printf("写入消息成功，commitLogOffset%d, queueOffset:%d", commitLogOffset, queueOffset)
+		}
+	}
+
+	return nil
 }
 
 /**
@@ -360,67 +422,33 @@ func (b *Broker) readConsumeQueueByOffset(consumeQueueFilePath string, messageOf
 	fmt.Printf("Message offset %v not found in consume queue file\n", messageOffset)
 }
 
-/**
-consume queue 文件，是topic 维度，一个topic一个文件
-当收到
-写入
-*/
-func (b *Broker) writeConsumeQueueByOffset() {
+func (b *Broker) init() {
 
+	// 初始化commitLog引擎
+	if commitLog, err := NewCommitLog(); err != nil {
+		log.Fatal(err)
+	} else {
+		b.CommitLog = commitLog
+	}
+
+	// 初始化topic
+	// 读取topic文件，并且写入
+	topicFile, err := os.OpenFile("./store/topic.db", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b.topicsFile = topicFile
+	scanner := bufio.NewScanner(b.topicsFile)
+	for scanner.Scan() {
+		topicName := scanner.Text()
+		if topicName != "" {
+			fmt.Println("读取到topic", scanner.Text())
+			topic := NewTopic(topicName)
+			b.topics[topicName] = topic
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Println("Scan file error:", err)
+	}
+	fmt.Println("初始化完成......")
 }
-
-//
-//// 创建commit log 的topic文件
-//func (b *Broker) createTopicCommitLogFile(topic string) *os.File {
-//	b.commitLogMutex.Lock()
-//	defer b.commitLogMutex.Unlock()
-//	filePath := fmt.Sprintf("%s.topic", topic)
-//	_, err := os.Stat(filePath)
-//	var file *os.File
-//	if os.IsNotExist(err) {
-//		// If the file does not exist, create it
-//		file, err = os.Create(filePath)
-//		if err != nil {
-//			fmt.Println("Failed to create file:", err)
-//			if file, err = os.OpenFile(fmt.Sprintf(filePath, topic), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
-//				fmt.Println("Failed to get file:", err)
-//			} else {
-//				b.commitLog[topic] = file
-//			}
-//		} else {
-//			b.commitLog[topic] = file
-//		}
-//		return file
-//	} else {
-//		if file, err = os.OpenFile(fmt.Sprintf("%s.log", topic), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err != nil {
-//			fmt.Println("Failed to get file:", err)
-//		} else {
-//			b.commitLog[topic] = file
-//		}
-//		return file
-//	}
-//}
-//
-//func (b *Broker) getTopicCommitLogFile(topic string) *os.File {
-//	if file, ok := b.commitLog[topic]; ok {
-//		return file
-//	} else {
-//		return b.createTopicCommitLogFile(topic)
-//	}
-//}
-//
-//func (b *Broker) storeMsgToCommitLog(coreMsg *coreMessage) {
-//
-//	if str, err := json.Marshal(coreMsg); err != nil {
-//		log.Printf("storeMsgToCommitLog json.Marshal error %+v", err)
-//	} else {
-//		if _, err := b.getTopicCommitLogFile(coreMsg.Topic).WriteString(string(str) + "\n"); err != nil {
-//			log.Printf("storeMsgToCommitLog WriteString error %+v, str is %s", err, str)
-//		} else {
-//			log.Printf("storeMsgToCommitLog success %s", str)
-//			if err := b.getTopicCommitLogFile(coreMsg.Topic).Sync(); err != nil {
-//				log.Printf("storeMsgToCommitLog Sync error %+v", err)
-//			}
-//		}
-//	}
-//}

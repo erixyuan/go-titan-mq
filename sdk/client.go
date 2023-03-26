@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/core"
@@ -26,6 +27,7 @@ type TitanConsumerClient struct {
 	clientId          string
 	consumerGroupName string
 	topic             string
+	NextConsumeOffset int64 // 下一个消费的offset
 }
 
 // 创建客户端
@@ -53,9 +55,9 @@ func (t *TitanConsumerClient) Start() error {
 	}
 
 	// 设置读写的超时时间
-	if err = conn.SetDeadline(time.Now().Add(t.timeout)); err != nil {
-		return err
-	}
+	//if err = conn.SetDeadline(time.Now().Add(t.timeout)); err != nil {
+	//	return err
+	//}
 	t.conn = conn
 
 	// 开协程进行循环读
@@ -129,11 +131,11 @@ func (t *TitanConsumerClient) accept() {
 		log.Printf("开始等待消息返回 %s %s", t.conn.RemoteAddr(), t.conn.LocalAddr())
 		for {
 			// 设置超时时间
-			t.conn.SetDeadline(time.Now().Add(t.timeout))
+			//t.conn.SetDeadline(time.Now().Add(t.timeout))
 			// Read a message from the message broker
 			// 这里会阻塞
 			// Print the message
-			buf := make([]byte, 1024)
+			buf := make([]byte, 1024*4*10)
 			n, err := t.conn.Read(buf)
 			if err != nil {
 				if err == io.EOF {
@@ -161,15 +163,17 @@ func (t *TitanConsumerClient) accept() {
 							log.Printf("remotingCommandResp error: %v", err)
 						} else {
 							if remotingCommandResp.Header.Code == 200 {
-								t.PullMessage()
+								t.PullMessage(0, 5)
 							}
 						}
 					case protocol.OpaqueType_Unsubscription:
 					case protocol.OpaqueType_Publish:
 					case protocol.OpaqueType_PullMessage:
+						log.Printf("收到消息返回")
 						responseData := protocol.PullMessageResponseData{}
+						log.Printf("responseData md5:%d", md5.Sum(remotingCommandResp.Body))
 						if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
-							log.Printf("remotingCommandResp error: %v", err)
+							log.Fatal("remotingCommandResp error: %v", err)
 						} else {
 							t.ProcessPullMessageHandler(responseData.Messages)
 						}
@@ -181,7 +185,7 @@ func (t *TitanConsumerClient) accept() {
 	}()
 }
 
-func (t *TitanConsumerClient) PullMessage() {
+func (t *TitanConsumerClient) PullMessage(queueId int, pullSize int) {
 	if t.clientId == "" {
 		time.Sleep(3 * time.Second)
 		if t.clientId == "" {
@@ -189,12 +193,14 @@ func (t *TitanConsumerClient) PullMessage() {
 			return
 		}
 	}
-	log.Printf("开始拉取数据, ClientId %s", t.clientId)
+	log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, t.NextConsumeOffset, queueId, pullSize)
 	requestData := protocol.PullMessageRequestData{
 		ClientId:      t.clientId,
 		Topic:         t.topic,
 		ConsumerGroup: t.consumerGroupName,
-		PullSize:      5,
+		PullSize:      int32(pullSize),
+		QueueId:       int32(queueId),
+		Offset:        t.NextConsumeOffset,
 	}
 	requestDataBytes, _ := proto.Marshal(&requestData)
 
@@ -213,16 +219,19 @@ func (t *TitanConsumerClient) PullMessage() {
 	// 发送请求
 	_, err := t.conn.Write(remotingCommandBytes)
 	if err != nil {
-		fmt.Printf("Failed to send request: %v\n", err)
+		log.Printf("发送PullMessage请求异常: %v", err)
 		return
 	}
 }
 
 func (t *TitanConsumerClient) ProcessPullMessageHandler(messages []*protocol.Message) {
 	for _, msg := range messages {
-		log.Printf("收到消息: %+v", msg)
+		log.Printf("收到消息: %+v, QueueOffset:%d", msg.MsgId, msg.QueueOffset)
+		// 消费完之后，更新当前的消费offset
+		t.NextConsumeOffset = msg.QueueOffset + 1
 	}
-	t.PullMessage()
+	time.Sleep(time.Second)
+	t.PullMessage(0, 5)
 }
 
 func GenerateSerialNumber(prefix string) string {
