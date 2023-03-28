@@ -163,6 +163,7 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 			log.Fatal("json.Unmarshal异常：", err)
 		} else {
 			log.Printf("读取topic.db成功 %+v", t.topicDb)
+			flushFlag := false
 			for topicName, d := range t.topicDb {
 				t.topics[topicName] = NewTopic(topicName)
 				for consumerGroupName, cg := range d.ConsumerGroups {
@@ -180,7 +181,25 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 							offset:        offset,
 						})
 					}
+					// 如果db中的队列数据量，少于现在的，更新db，但是如果在动态过程中调整的呢，增加了队列?
+					// 通过事件的方式处理
+					if len(t.topics[topicName].ConsumeQueues) > len(cg.QueueInfo) {
+						for i := len(cg.QueueInfo); i < len(t.topics[topicName].ConsumeQueues); i++ {
+							t.table = append(t.table, &TopicRouteRecord{
+								topic:         topicName,
+								consumerGroup: consumerGroupName,
+								queueId:       i,
+								clientId:      "",
+								offset:        0,
+							})
+							cg.QueueInfo[i] = 0
+						}
+						flushFlag = true // 刷盘
+					}
 				}
+			}
+			if flushFlag {
+				t.Flush()
 			}
 		}
 	}

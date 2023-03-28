@@ -95,3 +95,9 @@ func (h *HttpHandler) FetchTopicData(writer http.ResponseWriter, request *http.R
 		}
 	}
 }
+
+func (h *HttpHandler) FetchTopicTable(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+	for _, r := range h.topicRouteManager.table {
+		log.Printf("%s | %s | %d | %d | %s", r.topic, r.consumerGroup, r.queueId, r.offset, r.clientId)
+	}
+}

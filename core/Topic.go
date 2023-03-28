@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	QueueNumsDefault int = 1
+	QueueNumsDefault int = 3
 )
 
 type Topic struct {

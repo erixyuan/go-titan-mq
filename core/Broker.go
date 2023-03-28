@@ -79,6 +79,7 @@ func (b *Broker) Start(port int) error {
 	router.POST("/consumerGroup/add", handler.AddConsumerGroup)
 	router.POST("/topic/db", handler.FetchTopicDb)
 	router.GET("/topic/data", handler.FetchTopicData)
+	router.GET("/topic/table", handler.FetchTopicTable)
 
 	// 启动两个监听器
 	err = http.ListenAndServe(":9091", router)
@@ -377,13 +378,14 @@ func (b *Broker) GetTopicConsumerGroup(gname string, topic *Topic) *ConsumerGrou
 
 // 生产者只管往某个主题生产消息
 func (b *Broker) ProducerMessage(msg *protocol.Message) error {
+	log.Printf("%s开始写入数据", msg.MsgId)
 	// 根据消息的主题，选择队列
 	topicName := msg.Topic
 	topic := b.GetTopic(topicName)
-	// tod 随机选择队列
+	// 随机选择队列
 	randQueueId := rand.Intn(len(topic.ConsumeQueues))
+	log.Printf("%s 选择队列 %d", msg.MsgId, randQueueId)
 	consumeQueue := topic.ConsumeQueues[randQueueId]
-	// todo 这里要计算消息的长度
 	bodyBytes, err := proto.Marshal(msg)
 	if err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"log"
 	"math/rand"
+	"strconv"
 	"time"
 )
 
@@ -13,9 +14,9 @@ func main() {
 	broker := core.NewBroker()
 
 	go func() {
-		if false {
+		if true {
 			time.Sleep(5 * time.Second)
-			for i := 0; i < 10; i++ {
+			for i := 0; i < 100; i++ {
 				rand.Seed(time.Now().UnixNano())
 				intn := rand.Intn(2 * 4 * 1024)
 				body := make([]byte, intn)
@@ -25,7 +26,7 @@ func main() {
 					Body:           body,
 					BornTimestamp:  12312312,
 					StoreTimestamp: 0,
-					MsgId:          fmt.Sprintf("123-%d", i),
+					MsgId:          core.GenerateSerialNumber("P") + "--" + strconv.Itoa(i),
 					ProducerGroup:  "123",
 					ConsumerGroup:  "123",
 				}

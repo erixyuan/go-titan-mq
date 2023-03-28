@@ -63,17 +63,16 @@ func (t *TitanConsumerClient) Start() error {
 	//	return err
 	//}
 	t.conn = conn
-
+	t.pullMessageLock = true
 	// 开协程进行循环读
 	if t.acceptIsOpen == false {
 		t.accept()
 		t.acceptIsOpen = true
+		go t.PullMessage() // 只开启一次
 	}
 	if err = t.Subscribe(); err != nil {
 		log.Fatalf("订阅失败")
 	}
-	t.pullMessageLock = true
-	go t.PullMessage()
 	return nil
 }
 
@@ -189,7 +188,6 @@ func (t *TitanConsumerClient) PullMessage() {
 	for {
 		// 如果还没有注册clientid， 并且获取到的队列为空，继续等待
 		if t.clientId == "" || len(t.queueIds) < 1 || t.pullMessageLock == false {
-			log.Printf("不满足拉取消息的条件，等等....")
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -227,6 +225,7 @@ func (t *TitanConsumerClient) ProcessPullMessageHandler(messages []*protocol.Mes
 // 每5秒同步一次信息
 func (t *TitanConsumerClient) SyncTopicInfo() {
 	for {
+		log.Printf("发送同步主题消息的请求")
 		req := &protocol.SyncTopicRouteRequestData{
 			Topic:         t.topic,
 			ConsumerGroup: t.consumerGroupName,
@@ -265,6 +264,7 @@ func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {
 		log.Printf("SyncTopicInfoHandler error: %v", err)
 		return
 	}
+	log.Printf("收到同步主题的消息, 队列：%+v", resp.QueueId)
 	t.queueIds = resp.QueueId
 }
 
