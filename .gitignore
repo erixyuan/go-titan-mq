@@ -25,5 +25,4 @@ nohup.log
 pid
 *.log
 *.topic
-/store
 store
