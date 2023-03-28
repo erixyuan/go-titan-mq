@@ -1,18 +1,19 @@
 package core
 
 import (
-	"bufio"
 	"context"
-	"crypto/md5"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
+	"github.com/erixyuan/go-titan-mq/tools"
 	"github.com/golang/protobuf/proto"
+	"github.com/julienschmidt/httprouter"
 	"io"
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -27,13 +28,8 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 
 */
 
-var (
-	ErrMessageNotFound = errors.New("找不到消息")
-	ErrMessageNotYet   = errors.New("还没有消息")
-)
-
 type Broker struct {
-	clients            map[net.Conn]bool
+	clients            map[net.Conn]string // 方便从conn找到clientId
 	topics             map[string]*Topic
 	topicsLock         sync.Mutex
 	consumerGroupLock  sync.Mutex
@@ -41,11 +37,12 @@ type Broker struct {
 	commitLogMutex     sync.Mutex
 	CommitLog          *CommitLog
 	topicsFile         *os.File
+	topicRouteManager  *TopicRouteManager
 }
 
 func NewBroker() *Broker {
 	broker := Broker{
-		clients:            make(map[net.Conn]bool),
+		clients:            make(map[net.Conn]string),
 		topics:             make(map[string]*Topic),
 		topicsLock:         sync.Mutex{},
 		consumerGroupLock:  sync.Mutex{},
@@ -56,16 +53,43 @@ func NewBroker() *Broker {
 }
 
 func (b *Broker) Start(port int) error {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	fmt.Printf("Broker 开始初始化................................")
+	b.init()
+	tcpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
-
-	fmt.Printf("Broker 开始初始化................................")
-	b.init()
+	defer tcpListener.Close()
+	// 开启tcp的监听
 	fmt.Printf("Broker 开始初始化监听端口 port %d\n", port)
+	go b.tcpListenerHandler(tcpListener)
 
+	// 监听本地的HTTP连接
+	httpListener, _ := net.Listen("tcp", ":9090")
+	defer httpListener.Close()
+
+	fmt.Println("开始创建http服务")
+	// 创建HTTP服务器
+	router := httprouter.New()
+	handler := HttpHandler{
+		topicRouteManager: b.topicRouteManager,
+	}
+	router.GET("/", handler.Index)
+	router.POST("/topic/add", handler.AddTopic)
+	router.POST("/consumerGroup/add", handler.AddConsumerGroup)
+	router.POST("/topic/db", handler.FetchTopicDb)
+	router.GET("/topic/data", handler.FetchTopicData)
+
+	// 启动两个监听器
+	err = http.ListenAndServe(":9091", router)
+	if err != nil {
+		log.Fatal(err)
+	}
+	select {}
+	return nil
+}
+
+func (b *Broker) tcpListenerHandler(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -80,20 +104,32 @@ func (b *Broker) Start(port int) error {
 }
 
 func (b *Broker) ListeningClient(conn net.Conn) {
-	b.clients[conn] = true
 	for {
-		buf := make([]byte, 1024)
+		buf := make([]byte, 1024*4)
 		n, err := conn.Read(buf)
 		if err != nil {
 			fmt.Printf("Failed to read request from client: %v\n", err)
+			if err == io.EOF {
+				fmt.Printf("%s连接断开了，剔除client", conn.RemoteAddr())
+				b.topicRouteManager.RemoveClient(b.clients[conn])
+			}
 			return
 		}
 		remotingCommand := &protocol.RemotingCommand{}
 		err = proto.Unmarshal(buf[:n], remotingCommand)
+		if err != nil {
+			log.Printf("收到请求体，内容异常: error +%v", err)
+			continue
+		}
 		if remotingCommand.Type == protocol.RemotingCommandType_RequestCommand {
-			log.Printf("收到请求：%+v", remotingCommand.Header)
+			log.Printf("收到请求：%+v", &remotingCommand.Header)
 			// 如果是请求
 			switch remotingCommand.Header.Opaque {
+			//case protocol.OpaqueType_RegisterConsumer:
+			//go b.RegisterConsumer(remotingCommand.Body, conn)
+			case protocol.OpaqueType_SyncTopicRouteInfo:
+				// 同步路由信息
+				go b.SyncTopicRouteInfo(remotingCommand.Body, conn)
 			case protocol.OpaqueType_Subscription:
 				// 订阅消息
 				go b.SubscribeHandler(remotingCommand.Body, conn)
@@ -121,62 +157,72 @@ Consumer是在向Broker订阅消息时，将ClientId信息发送给Broker的。
 */
 func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 	log.Printf("收到订阅请求")
-	data := &protocol.SubscriptionRequestData{}
-	if err := proto.Unmarshal(body, data); err != nil {
-		log.Printf("SubscribeHandler error: %v", err)
+	req := protocol.SubscriptionRequestData{}
+	if err := proto.Unmarshal(body, &req); err != nil {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrRequest)
 		return
 	}
-	log.Printf("收到订阅请求，数据为：%+v", data)
-	topic := data.Topic
-	clientId := data.ClientId
-	consumerGroupName := data.ConsumerGroup
-	// 获取topic实体
-	thisTopic := b.GetTopic(topic)
-	// 获取消费组实体
-	consumerGroup := b.GetTopicConsumerGroup(consumerGroupName, thisTopic)
-	// 进行订阅
-	if _, ok := consumerGroup.Clients[clientId]; !ok {
-		client := Client{
-			Conn:          conn,
-			ClientID:      clientId,
-			LastHeartbeat: time.Now(),
-			Status:        1,
-			Queue:         thisTopic.queues[rand.Intn(len(thisTopic.queues))], // 随机分配队列
-		}
-		consumerGroup.Clients[clientId] = &client
-		log.Printf("订阅成功 %+v", client)
-	}
-
-	// 返回
-	responseData := protocol.SubscriptionResponseData{
-		Topic:         topic,
-		ClientId:      clientId,
-		ConsumerGroup: consumerGroupName,
-	}
-	if bytes, err := proto.Marshal(&responseData); err != nil {
-		log.Printf("SubscribeHandler error: %v", err)
+	log.Printf("收到订阅请求，数据为：%+v", req)
+	topicName := req.Topic
+	clientId := req.ClientId
+	consumerGroupName := req.ConsumerGroup
+	// 检查topic是否存在
+	if topic, ok := b.topics[topicName]; !ok {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrMessageNotYet)
+		return
 	} else {
-		remotingCommand := protocol.RemotingCommand{
-			Type: protocol.RemotingCommandType_ResponseCommand,
-			Header: &protocol.RemotingCommandHeader{
-				Code:   200,
-				Opaque: protocol.OpaqueType_Subscription,
-				Flag:   0,
-				Remark: "",
-			},
-			Body: bytes,
-		}
-		if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
-			log.Printf("SubscribeHandler error: %v", err)
+		// 检查消费组是否存在
+		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
+			log.Printf("SubscribeHandler error: 消费组[%s]不存在", consumerGroupName)
+			b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrConsumerGroupNotExist)
+			return
 		} else {
-			if _, err := conn.Write(remotingCommandBytes); err != nil {
-				fmt.Printf("Failed to send response: %v\n", err)
+			if _, ok := consumerGroup.Clients[clientId]; ok {
+				// 已经存在了就返回订阅异常
+				log.Printf("SubscribeHandler error: 消费组中的ClientId已经存在")
+				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrClientExist)
+				return
 			} else {
-				log.Printf("返回订阅消息成功")
+				// 注册消费者
+				if err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
+					// 登记入当前的客户端表，方便查询
+					b.clients[conn] = clientId
+				}
 			}
 		}
 	}
 
+	queueIds := b.topicRouteManager.FindQueueId(req.Topic, req.ConsumerGroup, req.ClientId)
+	// 返回
+	responseData := protocol.SubscriptionResponseData{
+		Topic:         topicName,
+		ClientId:      clientId,
+		ConsumerGroup: consumerGroupName,
+		QueueIds:      queueIds,
+	}
+	if bytes, err := proto.Marshal(&responseData); err != nil {
+		log.Printf("SubscribeHandler error: %v", err)
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+	} else {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, bytes, nil)
+	}
+
+}
+func (b *Broker) SyncTopicRouteInfo(body []byte, conn net.Conn) {
+	req := &protocol.SyncTopicRouteRequestData{}
+	if err := proto.Unmarshal(body, req); err != nil {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+		return
+	}
+	queueIds := b.topicRouteManager.FindQueueId(req.Topic, req.ConsumerGroup, req.ClientId)
+	resp := protocol.SyncTopicRouteResponseData{}
+	resp.QueueId = queueIds
+	if bytes, err := proto.Marshal(&resp); err != nil {
+		log.Printf("SyncTopicRouteInfo error: %v", err)
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+	} else {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, bytes, nil)
+	}
 }
 
 /**
@@ -190,22 +236,49 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 		log.Printf("SubscribeHandler error: %v", err)
 		return
 	}
-	topic := data.Topic
+	topicName := data.Topic
 	clientId := data.ClientId
 	consumerGroupName := data.ConsumerGroup
 	pullSize := data.PullSize
 	queueId := data.QueueId
 	offset := data.Offset
+	log.Printf("收到拉取数据请求：%+v", data)
+	// 检查topic是否存在
+	if topic, ok := b.topics[topicName]; !ok {
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
+	} else {
+		// 检查消费组是否存在
+		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
+			log.Printf("PullMessageHandler error: 消费组不存在")
+			b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrConsumerGroupNotExist)
+			return
+		} else {
+			if _, ok := consumerGroup.Clients[clientId]; !ok {
+				log.Printf("PullMessageHandler error: ClientId不存在")
+				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrRequest)
+				return
+			}
+			// 从路由标找到当前的client
+			queueIds := b.topicRouteManager.FindQueueId(topicName, consumerGroup.GroupName, clientId)
+			// 判断队列Id是否是分配的
+			if !tools.ContainsInt(queueIds, queueId) {
+				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrQueueId)
+				return
+			}
+		}
+	}
 
 	// 找到之前分配的channel
-	consumeQueue := b.topics[topic].ConsumeQueues[queueId]
+	log.Printf("PullMessageHandler 获取分配的队列ID：%+v", b.topics[topicName].ConsumeQueues)
+	log.Printf("PullMessageHandler 获取分配的队列ID：%d", queueId)
+	consumeQueue := b.topics[topicName].ConsumeQueues[queueId]
 
 	// 构建返回数据
 	responseData := protocol.PullMessageResponseData{}
-	responseData.Topic = topic
+	responseData.Topic = topicName
 	responseData.ConsumerGroup = consumerGroupName
 	responseData.Messages = make([]*protocol.Message, 0)
-	log.Printf("ClientId: %s 要拉取 %d 条数据, 开始监听chanel %+v", clientId, pullSize, consumeQueue)
+	log.Printf("ClientId: %s 要拉取 %d 条数据, offset:%d,  开始监听queue %d", clientId, pullSize, offset, consumeQueue.queueId)
 
 	fetchDataChanDone := make(chan struct{})
 	go func() {
@@ -264,26 +337,7 @@ ReturnPullMessageData:
 	if bytes, err := proto.Marshal(&responseData); err != nil {
 		log.Printf("PullMessageHandler error: %v", err)
 	} else {
-		remotingCommand := protocol.RemotingCommand{
-			Type: protocol.RemotingCommandType_ResponseCommand,
-			Header: &protocol.RemotingCommandHeader{
-				Code:   200,
-				Opaque: protocol.OpaqueType_PullMessage,
-				Flag:   0,
-				Remark: "",
-			},
-			Body: bytes,
-		}
-		log.Printf("responseData md5:%d", md5.Sum(bytes))
-		if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
-			log.Printf("PullMessageHandler error: %v", err)
-		} else {
-			if _, err := conn.Write(remotingCommandBytes); err != nil {
-				fmt.Printf("Failed to send response: %v\n", err)
-			} else {
-				log.Printf("返回拉数据的结果成功, 数量为 %d", responseData.Size)
-			}
-		}
+		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, bytes, nil)
 	}
 }
 
@@ -433,22 +487,47 @@ func (b *Broker) init() {
 
 	// 初始化topic
 	// 读取topic文件，并且写入
-	topicFile, err := os.OpenFile("./store/topic.db", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	b.topicRouteManager = &TopicRouteManager{}
+	topics, err := b.topicRouteManager.Init()
 	if err != nil {
 		log.Fatal(err)
-	}
-	b.topicsFile = topicFile
-	scanner := bufio.NewScanner(b.topicsFile)
-	for scanner.Scan() {
-		topicName := scanner.Text()
-		if topicName != "" {
-			fmt.Println("读取到topic", scanner.Text())
-			topic := NewTopic(topicName)
-			b.topics[topicName] = topic
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Println("Scan file error:", err)
+	} else {
+		b.topics = topics
 	}
 	fmt.Println("初始化完成......")
+}
+
+func (b *Broker) Return(conn net.Conn, commandType protocol.RemotingCommandType, opaque protocol.OpaqueType, dataBytes []byte, err error) {
+	var remotingCommand protocol.RemotingCommand
+	if err != nil {
+		remotingCommand = protocol.RemotingCommand{
+			Type: commandType,
+			Header: &protocol.RemotingCommandHeader{
+				Code:   400,
+				Opaque: opaque,
+				Flag:   0,
+				Remark: "",
+			},
+			Body: []byte(err.Error()),
+		}
+	} else {
+		remotingCommand = protocol.RemotingCommand{
+			Type: commandType,
+			Header: &protocol.RemotingCommandHeader{
+				Code:   200,
+				Opaque: opaque,
+				Flag:   0,
+				Remark: "",
+			},
+			Body: dataBytes,
+		}
+	}
+	if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
+		log.Printf("PullMessageHandler error: %v", err)
+	} else {
+		if _, err := conn.Write(remotingCommandBytes); err != nil {
+			fmt.Printf("Failed to send response: %v\n", err)
+		}
+	}
+
 }

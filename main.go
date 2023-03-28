@@ -13,7 +13,7 @@ func main() {
 	broker := core.NewBroker()
 
 	go func() {
-		if true {
+		if false {
 			time.Sleep(5 * time.Second)
 			for i := 0; i < 10; i++ {
 				rand.Seed(time.Now().UnixNano())
@@ -41,4 +41,5 @@ func main() {
 	if err := broker.Start(9999); err != nil {
 		log.Fatalf("启动服务失败")
 	}
+
 }

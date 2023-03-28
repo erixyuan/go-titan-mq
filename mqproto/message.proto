@@ -14,6 +14,10 @@ enum OpaqueType {
     Unsubscription = 1;
     Publish = 2;
     PullMessage = 3;
+    // 获取路由信息
+    SyncTopicRouteInfo = 4;
+    // 注册消费者
+    RegisterConsumer = 5;
 }
 
 message RemotingCommandHeader{
@@ -45,6 +49,7 @@ message SubscriptionResponseData {
     string  topic = 1;
     string clientId = 2;
     string consumerGroup = 3;
+    repeated int32 queueIds =4;
 }
 
 message PullMessageRequestData {
@@ -62,6 +67,24 @@ message PullMessageResponseData {
     int32 size = 3;
     repeated Message messages = 4;
 }
+
+message SyncTopicRouteRequestData {
+    string topic =1;
+    string consumerGroup = 2;
+    string clientId = 3;
+}
+message SyncTopicRouteResponseData {
+    repeated int32 queueId =1;
+}
+message RegisterConsumerRequestData {
+    string topic =1;
+    string consumerGroup = 2;
+    string clientId = 3;
+}
+message RegisterConsumerResponseData {
+    repeated int32 queueId =1;
+}
+
 
 message Message {
     // 主题
@@ -84,3 +107,11 @@ message Message {
     int64 queueOffset = 10;
 }
 
+
+message AddTopicRequest {
+    string topicName = 1;
+}
+message AddConsumerGroupRequest {
+    string topicName = 1;
+    string groupName = 2;
+}

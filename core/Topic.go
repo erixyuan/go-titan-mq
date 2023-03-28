@@ -13,7 +13,6 @@ type Topic struct {
 	topicName      string
 	consumerGroups map[string]*ConsumerGroup
 	producerGroups map[string]*ProducerGroup
-	queues         []chan protocol.Message
 	ConsumeQueues  []*ConsumeQueue
 }
 
@@ -27,7 +26,6 @@ func NewTopic(topicName string) *Topic {
 		topicName:      topicName,
 		consumerGroups: m1,
 		producerGroups: m2,
-		queues:         q, // 默认3个队列
 	}
 	for i := 0; i < QueueNumsDefault; i++ {
 		queue, err := NewConsumeQueue(topicName, i)
