@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/erixyuan/go-titan-mq/core"
+	"github.com/erixyuan/go-titan-mq/broker"
 	"log"
 	"net"
 	"os"
@@ -21,7 +21,7 @@ func main() {
 	count := 1
 	for {
 		// 发送消息到 news 主题
-		message := core.Message{
+		message := broker.Message{
 			Topic:   "news",
 			Payload: fmt.Sprintf("Hello,world%d!", count),
 		}

@@ -1,4 +1,4 @@
-package core
+package broker
 
 import (
 	"context"
@@ -126,8 +126,8 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 			log.Printf("收到请求：%+v", &remotingCommand.Header)
 			// 如果是请求
 			switch remotingCommand.Header.Opaque {
-			//case protocol.OpaqueType_RegisterConsumer:
-			//go b.RegisterConsumer(remotingCommand.Body, conn)
+			case protocol.OpaqueType_Heartbeat:
+				go b.HeartbeatHandler(remotingCommand.Body, conn)
 			case protocol.OpaqueType_SyncTopicRouteInfo:
 				// 同步路由信息
 				go b.SyncTopicRouteInfo(remotingCommand.Body, conn)
@@ -160,7 +160,7 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 	log.Printf("收到订阅请求")
 	req := protocol.SubscriptionRequestData{}
 	if err := proto.Unmarshal(body, &req); err != nil {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrRequest)
+		b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrRequest)
 		return
 	}
 	log.Printf("收到订阅请求，数据为：%+v", req)
@@ -169,19 +169,19 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 	consumerGroupName := req.ConsumerGroup
 	// 检查topic是否存在
 	if topic, ok := b.topics[topicName]; !ok {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrMessageNotYet)
+		b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrMessageNotYet)
 		return
 	} else {
 		// 检查消费组是否存在
 		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
 			log.Printf("SubscribeHandler error: 消费组[%s]不存在", consumerGroupName)
-			b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrConsumerGroupNotExist)
+			b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrConsumerGroupNotExist)
 			return
 		} else {
 			if _, ok := consumerGroup.Clients[clientId]; ok {
 				// 已经存在了就返回订阅异常
 				log.Printf("SubscribeHandler error: 消费组中的ClientId已经存在")
-				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, nil, ErrClientExist)
+				b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrClientExist)
 				return
 			} else {
 				// 注册消费者
@@ -203,16 +203,16 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 	}
 	if bytes, err := proto.Marshal(&responseData); err != nil {
 		log.Printf("SubscribeHandler error: %v", err)
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	} else {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_Subscription, bytes, nil)
+		b.Return(conn, protocol.OpaqueType_Subscription, bytes, nil)
 	}
 
 }
 func (b *Broker) SyncTopicRouteInfo(body []byte, conn net.Conn) {
 	req := &protocol.SyncTopicRouteRequestData{}
 	if err := proto.Unmarshal(body, req); err != nil {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 		return
 	}
 	queueIds := b.topicRouteManager.FindQueueId(req.Topic, req.ConsumerGroup, req.ClientId)
@@ -220,9 +220,40 @@ func (b *Broker) SyncTopicRouteInfo(body []byte, conn net.Conn) {
 	resp.QueueId = queueIds
 	if bytes, err := proto.Marshal(&resp); err != nil {
 		log.Printf("SyncTopicRouteInfo error: %v", err)
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	} else {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_SyncTopicRouteInfo, bytes, nil)
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, bytes, nil)
+	}
+}
+
+func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn) {
+	req := &protocol.HeartbeatRequestData{}
+	if err := proto.Unmarshal(body, req); err != nil {
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+		return
+	}
+	if req.Topic == "" || req.ConsumerGroup == "" || req.ClientId == "" {
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
+	}
+	client, err := b.GetClient(req.Topic, req.ConsumerGroup, req.ClientId)
+	if err != nil {
+		log.Printf("HeartbeatHandler error: %v", err)
+		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, err)
+	}
+	// 更新客户端的
+	client.Status = 1
+	client.LastHeartbeat = time.Now()
+	if req.ConsumeProgress != nil && len(req.ConsumeProgress) > 0 {
+		for _, c := range req.ConsumeProgress {
+			record, err := b.topicRouteManager.GetTopicTableRecord(req.Topic, req.ConsumerGroup, req.ClientId, c.QueueId)
+			if err != nil {
+				log.Printf("HeartbeatHandler error: %v", err)
+				continue
+			}
+			if c.Offset > record.offset {
+				c.Offset = record.offset
+			}
+		}
 	}
 }
 
@@ -246,24 +277,24 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 	log.Printf("收到拉取数据请求：%+v", data)
 	// 检查topic是否存在
 	if topic, ok := b.topics[topicName]; !ok {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
+		b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
 	} else {
 		// 检查消费组是否存在
 		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
 			log.Printf("PullMessageHandler error: 消费组不存在")
-			b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrConsumerGroupNotExist)
+			b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrConsumerGroupNotExist)
 			return
 		} else {
 			if _, ok := consumerGroup.Clients[clientId]; !ok {
 				log.Printf("PullMessageHandler error: ClientId不存在")
-				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrRequest)
+				b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrRequest)
 				return
 			}
 			// 从路由标找到当前的client
 			queueIds := b.topicRouteManager.FindQueueId(topicName, consumerGroup.GroupName, clientId)
 			// 判断队列Id是否是分配的
 			if !tools.ContainsInt(queueIds, queueId) {
-				b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, nil, ErrQueueId)
+				b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrQueueId)
 				return
 			}
 		}
@@ -338,7 +369,7 @@ ReturnPullMessageData:
 	if bytes, err := proto.Marshal(&responseData); err != nil {
 		log.Printf("PullMessageHandler error: %v", err)
 	} else {
-		b.Return(conn, protocol.RemotingCommandType_ResponseCommand, protocol.OpaqueType_PullMessage, bytes, nil)
+		b.Return(conn, protocol.OpaqueType_PullMessage, bytes, nil)
 	}
 }
 
@@ -489,7 +520,9 @@ func (b *Broker) init() {
 
 	// 初始化topic
 	// 读取topic文件，并且写入
-	b.topicRouteManager = &TopicRouteManager{}
+	b.topicRouteManager = &TopicRouteManager{
+		flushLock: sync.Mutex{},
+	}
 	topics, err := b.topicRouteManager.Init()
 	if err != nil {
 		log.Fatal(err)
@@ -499,11 +532,11 @@ func (b *Broker) init() {
 	fmt.Println("初始化完成......")
 }
 
-func (b *Broker) Return(conn net.Conn, commandType protocol.RemotingCommandType, opaque protocol.OpaqueType, dataBytes []byte, err error) {
+func (b *Broker) Return(conn net.Conn, opaque protocol.OpaqueType, dataBytes []byte, err error) {
 	var remotingCommand protocol.RemotingCommand
 	if err != nil {
 		remotingCommand = protocol.RemotingCommand{
-			Type: commandType,
+			Type: protocol.RemotingCommandType_ResponseCommand,
 			Header: &protocol.RemotingCommandHeader{
 				Code:   400,
 				Opaque: opaque,
@@ -514,7 +547,7 @@ func (b *Broker) Return(conn net.Conn, commandType protocol.RemotingCommandType,
 		}
 	} else {
 		remotingCommand = protocol.RemotingCommand{
-			Type: commandType,
+			Type: protocol.RemotingCommandType_ResponseCommand,
 			Header: &protocol.RemotingCommandHeader{
 				Code:   200,
 				Opaque: opaque,
@@ -532,4 +565,21 @@ func (b *Broker) Return(conn net.Conn, commandType protocol.RemotingCommandType,
 		}
 	}
 
+}
+
+func (b *Broker) GetClient(topicName string, consumerGroupName string, clientId string) (*Client, error) {
+	if topic, ok := b.topics[topicName]; !ok {
+		return nil, ErrConsumerGroupNotExist
+	} else {
+		// 检查消费组是否存在
+		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
+			return nil, ErrConsumerGroupNotExist
+		} else {
+			if client, ok := consumerGroup.Clients[clientId]; !ok {
+				return nil, ErrConsumerGroupNotExist
+			} else {
+				return client, nil
+			}
+		}
+	}
 }

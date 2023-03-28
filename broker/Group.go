@@ -1,4 +1,4 @@
-package core
+package broker
 
 type ProducerGroup struct {
 	TopicName string

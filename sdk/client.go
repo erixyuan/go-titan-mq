@@ -1,10 +1,9 @@
 package sdk
 
 import (
-	"crypto/md5"
 	"encoding/json"
 	"fmt"
-	"github.com/erixyuan/go-titan-mq/core"
+	"github.com/erixyuan/go-titan-mq/broker"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
 	"io"
@@ -22,12 +21,13 @@ type TitanConsumerClient struct {
 	timeout           time.Duration
 	retryTime         time.Duration
 	conn              net.Conn
-	callback          map[string]func(core.Message)
+	callback          map[string]func(broker.Message)
 	acceptIsOpen      bool
 	clientId          string
 	consumerGroupName string
 	topic             string
 	queueIds          []int32
+	queueOffset       map[int32]int64
 	pullMessageSize   int32
 	NextConsumeOffset int64 // 下一个消费的offset
 	pullMessageLock   bool
@@ -38,12 +38,13 @@ func (t *TitanConsumerClient) Init(address string, topic string, name string) {
 	t.address = address
 	t.timeout = 1 * time.Second
 	t.retryTime = 1 * time.Second
-	t.callback = make(map[string]func(core.Message))
+	t.callback = make(map[string]func(broker.Message))
 	t.acceptIsOpen = false
 	t.topic = topic
 	t.clientId = GenerateSerialNumber("CLIENT")
 	t.consumerGroupName = name
 	t.pullMessageSize = 5
+	t.queueOffset = make(map[int32]int64)
 }
 
 // 设置超时时间
@@ -83,14 +84,14 @@ func (t *TitanConsumerClient) Subscribe() error {
 		ConsumerGroup: t.consumerGroupName,
 		ClientId:      t.clientId,
 	}
-	log.Printf("准备订阅消息%+v", body)
+	//log.Printf("准备订阅消息%+v", body)
 	if bodyBytes, err := proto.Marshal(&body); err != nil {
 		log.Printf("Subscribe error: %v", err)
 	} else {
 		go t.SendCommand(protocol.OpaqueType_Subscription, bodyBytes)
 	}
 
-	log.Printf("发送订阅消息成功，等待回复")
+	//log.Printf("发送订阅消息成功，等待回复")
 	return nil
 }
 
@@ -99,13 +100,13 @@ func (t *TitanConsumerClient) Public(topic string, content string) error {
 }
 
 func (t *TitanConsumerClient) send(topic string, payload string) error {
-	message := core.Message{
+	message := broker.Message{
 		Topic:   topic,
 		Payload: payload,
 	}
 	s, _ := json.Marshal(message)
 	b := string(s)
-	log.Println("发送消息：", b)
+	//log.Println("发送消息：", b)
 	if _, err := fmt.Fprintln(t.conn, b); err != nil {
 		return err
 	}
@@ -151,26 +152,27 @@ func (t *TitanConsumerClient) accept() {
 					} else {
 						switch remotingCommandResp.Header.Opaque {
 						case protocol.OpaqueType_Subscription:
-							log.Printf("收到订阅消息的响应")
+							//log.Printf("收到订阅消息的响应")
 							responseData := protocol.SubscriptionResponseData{}
 							if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
 								log.Printf("收取订阅消息异常 error: %v", err)
 							} else {
-								log.Printf("收取订阅消息内容: %+v", responseData)
+								//log.Printf("收取订阅消息内容: %+v", responseData)
 								if len(responseData.QueueIds) > 0 {
 									t.queueIds = responseData.QueueIds
 								}
 								// 开启同步
-								go t.SyncTopicInfo()
+								go t.SendSyncTopicInfo()
+								go t.SendHeartbeat()
 							}
 						case protocol.OpaqueType_SyncTopicRouteInfo:
 							go t.SyncTopicInfoHandler(remotingCommandResp.Body)
 						case protocol.OpaqueType_Unsubscription:
 						case protocol.OpaqueType_Publish:
 						case protocol.OpaqueType_PullMessage:
-							log.Printf("收到消息返回")
+							//log.Printf("收到消息返回")
 							responseData := protocol.PullMessageResponseData{}
-							log.Printf("responseData md5:%d", md5.Sum(remotingCommandResp.Body))
+							//log.Printf("responseData md5:%d", md5.Sum(remotingCommandResp.Body))
 							if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
 								log.Fatal("remotingCommandResp error: %v", err)
 							} else {
@@ -195,16 +197,16 @@ func (t *TitanConsumerClient) PullMessage() {
 		// 随机获取一个队列
 		rand.Seed(time.Now().UnixNano())
 		randQueueIndex := rand.Intn(len(t.queueIds))
-
+		nextConsumeOffset := t.queueOffset[t.queueIds[randQueueIndex]]
 		requestData := protocol.PullMessageRequestData{
 			ClientId:      t.clientId,
 			Topic:         t.topic,
 			ConsumerGroup: t.consumerGroupName,
 			PullSize:      t.pullMessageSize,
 			QueueId:       t.queueIds[randQueueIndex], // 随机获取一个队列
-			Offset:        t.NextConsumeOffset,
+			Offset:        nextConsumeOffset,
 		}
-		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, t.NextConsumeOffset, t.queueIds[randQueueIndex], t.pullMessageSize)
+		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, nextConsumeOffset, t.queueIds[randQueueIndex], t.pullMessageSize)
 		requestDataBytes, _ := proto.Marshal(&requestData)
 		t.SendCommand(protocol.OpaqueType_PullMessage, requestDataBytes)
 		t.pullMessageLock = false
@@ -214,16 +216,17 @@ func (t *TitanConsumerClient) PullMessage() {
 
 func (t *TitanConsumerClient) ProcessPullMessageHandler(messages []*protocol.Message) {
 	for _, msg := range messages {
-		log.Printf("收到消息: %+v, QueueOffset:%d", msg.MsgId, msg.QueueOffset)
+		log.Printf("收到消息: msgId:%+v, QueueId:%d, QueueOffset:%d", msg.MsgId, msg.QueueId, msg.QueueOffset)
 		// 消费完之后，更新当前的消费offset
 		t.NextConsumeOffset = msg.QueueOffset + 1
+		t.queueOffset[msg.QueueId] = msg.QueueOffset + 1
 	}
 	time.Sleep(time.Second)
 	t.pullMessageLock = true
 }
 
 // 每5秒同步一次信息
-func (t *TitanConsumerClient) SyncTopicInfo() {
+func (t *TitanConsumerClient) SendSyncTopicInfo() {
 	for {
 		log.Printf("发送同步主题消息的请求")
 		req := &protocol.SyncTopicRouteRequestData{
@@ -233,6 +236,31 @@ func (t *TitanConsumerClient) SyncTopicInfo() {
 		}
 		bytes, _ := proto.Marshal(req)
 		t.SendCommand(protocol.OpaqueType_SyncTopicRouteInfo, bytes)
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// 每5秒同步一次信息
+func (t *TitanConsumerClient) SendHeartbeat() {
+	for {
+		if t.clientId != "" {
+			log.Printf("发送心跳请求")
+			var consumeProgress = make([]*protocol.ConsumeProgress, 0)
+			for queueId, offset := range t.queueOffset {
+				consumeProgress = append(consumeProgress, &protocol.ConsumeProgress{
+					QueueId: queueId,
+					Offset:  offset,
+				})
+			}
+			req := &protocol.HeartbeatRequestData{
+				Topic:           t.topic,
+				ConsumerGroup:   t.consumerGroupName,
+				ClientId:        t.clientId,
+				ConsumeProgress: consumeProgress,
+			}
+			bytes, _ := proto.Marshal(req)
+			t.SendCommand(protocol.OpaqueType_Heartbeat, bytes)
+		}
 		time.Sleep(5 * time.Second)
 	}
 }

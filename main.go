@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/erixyuan/go-titan-mq/core"
+	"github.com/erixyuan/go-titan-mq/broker"
 	"github.com/erixyuan/go-titan-mq/protocol"
+	"github.com/erixyuan/go-titan-mq/tools"
 	"log"
 	"math/rand"
 	"strconv"
@@ -11,10 +12,10 @@ import (
 )
 
 func main() {
-	broker := core.NewBroker()
+	broker := broker.NewBroker()
 
 	go func() {
-		if true {
+		if false {
 			time.Sleep(5 * time.Second)
 			for i := 0; i < 100; i++ {
 				rand.Seed(time.Now().UnixNano())
@@ -26,7 +27,7 @@ func main() {
 					Body:           body,
 					BornTimestamp:  12312312,
 					StoreTimestamp: 0,
-					MsgId:          core.GenerateSerialNumber("P") + "--" + strconv.Itoa(i),
+					MsgId:          tools.GenerateSerialNumber("P") + "--" + strconv.Itoa(i),
 					ProducerGroup:  "123",
 					ConsumerGroup:  "123",
 				}

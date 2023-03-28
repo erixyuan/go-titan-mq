@@ -18,6 +18,8 @@ enum OpaqueType {
     SyncTopicRouteInfo = 4;
     // 注册消费者
     RegisterConsumer = 5;
+    // 心跳
+    Heartbeat = 6;
 }
 
 message RemotingCommandHeader{
@@ -83,6 +85,17 @@ message RegisterConsumerRequestData {
 }
 message RegisterConsumerResponseData {
     repeated int32 queueId =1;
+}
+
+message ConsumeProgress {
+    int32 queueId = 1;
+    int64 offset = 2;
+}
+message HeartbeatRequestData {
+    string topic =1;
+    string consumerGroup = 2;
+    string clientId = 3;
+    repeated ConsumeProgress consumeProgress = 4;
 }
 
 

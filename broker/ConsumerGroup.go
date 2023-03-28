@@ -1,4 +1,4 @@
-package core
+package broker
 
 type ConsumerGroup struct {
 	TopicName string             // 主题名称

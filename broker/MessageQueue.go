@@ -1,4 +1,4 @@
-package core
+package broker
 
 import (
 	"github.com/erixyuan/go-titan-mq/protocol"

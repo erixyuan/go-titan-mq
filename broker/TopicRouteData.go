@@ -1,4 +1,4 @@
-package core
+package broker
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,7 @@ type TopicRouteManager struct {
 	topicsFile *os.File
 	topicDb    map[string]*topicInfo
 	topics     map[string]*Topic
+	flushLock  sync.Mutex
 }
 
 func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGroupName string) error {
@@ -203,6 +205,7 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 			}
 		}
 	}
+	go t.AutoRefresh()
 	return t.topics, nil
 }
 
@@ -231,6 +234,8 @@ func (t *TopicRouteManager) RegisterTopic(topicName string) error {
 }
 
 func (t *TopicRouteManager) Flush() error {
+	t.flushLock.Lock()
+	t.flushLock.Unlock()
 	var err error
 	bytes, err := json.Marshal(t.topicDb)
 	if err != nil {
@@ -270,5 +275,21 @@ func (t *TopicRouteManager) RemoveClient(clientId string) {
 		if r.clientId == clientId {
 			r.clientId = ""
 		}
+	}
+}
+
+func (t *TopicRouteManager) GetTopicTableRecord(topicName string, consumerGroupName string, clientId string, qid int32) (*TopicRouteRecord, error) {
+	for _, record := range t.table {
+		if record.topic == topicName && record.consumerGroup == consumerGroupName && record.clientId == clientId && int32(record.queueId) == qid {
+			return record, nil
+		}
+	}
+	return nil, ErrTopicTableRecordNotFound
+}
+
+func (t *TopicRouteManager) AutoRefresh() {
+	for {
+		t.Flush()
+		time.Sleep(5 * time.Second)
 	}
 }

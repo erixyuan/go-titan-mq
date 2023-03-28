@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/erixyuan/go-titan-mq/core"
+	"github.com/erixyuan/go-titan-mq/broker"
 	"github.com/erixyuan/go-titan-mq/sdk"
 	"log"
 )
@@ -33,6 +33,6 @@ func main() {
 	}
 }
 
-func consume(msg core.Message) {
+func consume(msg broker.Message) {
 	log.Println(msg)
 }
