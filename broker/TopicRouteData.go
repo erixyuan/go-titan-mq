@@ -69,6 +69,16 @@ func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGrou
 				GroupName: consumerGroupName,
 				Clients:   make(map[string]*Client),
 			}
+			// 更新table
+			for qid, _ := range queueInfo {
+				t.table = append(t.table, &TopicRouteRecord{
+					topic:         topicName,
+					consumerGroup: consumerGroupName,
+					queueId:       qid,
+					clientId:      "",
+					offset:        0,
+				})
+			}
 			log.Printf("创建消费组成功：+%v", topic.ConsumerGroups[consumerGroupName])
 		}
 	}
@@ -84,7 +94,7 @@ func (t *TopicRouteManager) RegisterConsumer(topicName string, consumerGroupName
 		LastHeartbeat: time.Now(),
 		Status:        1,
 	}
-	log.Println("开始注册消费者；+%v", client)
+	log.Printf("开始注册消费者；+%v", client)
 	t.topics[topicName].consumerGroups[consumerGroupName].Clients[clientId] = &client
 	return t.ReBalanceByRegister(topicName, consumerGroupName)
 }
@@ -109,7 +119,7 @@ func (t *TopicRouteManager) ReBalanceByRegister(topicName string, consumerGroupN
 	}
 	topicRouteRecordsSize := len(topicRouteRecords)
 	clientsSize := len(clients)
-	log.Println("ReBalanceByRegister - topicRouteRecordsSize：%d, clientsSize:%d", topicRouteRecordsSize, clientsSize)
+	log.Printf("ReBalanceByRegister - topicRouteRecordsSize：%d, clientsSize:%d", topicRouteRecordsSize, clientsSize)
 	//重新分配
 	//分配策略: 获取现在所有的消费组中所有的clientId，做平均分配
 	var targetClients []*Client
@@ -220,12 +230,15 @@ func (t *TopicRouteManager) RegisterTopic(topicName string) error {
 		log.Println("新增失败，主题已经存在")
 		return nil
 	} else {
+		// 更新db
 		t.topicDb[topicName] = &topicInfo{
 			TopicName:      topicName,
 			ConsumerGroups: make(map[string]*consumerGroupInfo, 0),
 		}
 		t.topics[topicName] = NewTopic(topicName)
+
 	}
+
 	if err := t.Flush(); err != nil {
 		return err
 	}

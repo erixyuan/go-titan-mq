@@ -90,8 +90,7 @@ func (t *TitanConsumerClient) Subscribe() error {
 	} else {
 		go t.SendCommand(protocol.OpaqueType_Subscription, bodyBytes)
 	}
-
-	//log.Printf("发送订阅消息成功，等待回复")
+	log.Printf("发送订阅消息成功，等待回复 %+v", body)
 	return nil
 }
 
@@ -244,11 +243,10 @@ func (t *TitanConsumerClient) SendSyncTopicInfo() {
 func (t *TitanConsumerClient) SendHeartbeat() {
 	for {
 		if t.clientId != "" {
-			log.Printf("发送心跳请求")
 			var consumeProgress = make([]*protocol.ConsumeProgress, 0)
 			for queueId, offset := range t.queueOffset {
 				consumeProgress = append(consumeProgress, &protocol.ConsumeProgress{
-					QueueId: queueId,
+					QueueId: queueId, // 由于0值会丢失，所以模式加一
 					Offset:  offset,
 				})
 			}
@@ -258,6 +256,7 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 				ClientId:        t.clientId,
 				ConsumeProgress: consumeProgress,
 			}
+			log.Printf("发送心跳请求 %+v", req)
 			bytes, _ := proto.Marshal(req)
 			t.SendCommand(protocol.OpaqueType_Heartbeat, bytes)
 		}

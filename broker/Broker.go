@@ -111,7 +111,7 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 		if err != nil {
 			fmt.Printf("Failed to read request from client: %v\n", err)
 			if err == io.EOF {
-				fmt.Printf("%s连接断开了，剔除client", conn.RemoteAddr())
+				fmt.Printf("%s | %s连接断开了，剔除client", conn.RemoteAddr(), b.clients[conn])
 				b.topicRouteManager.RemoveClient(b.clients[conn])
 			}
 			return
@@ -186,8 +186,12 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 			} else {
 				// 注册消费者
 				if err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
+					log.Printf("SubscribeHandler error: %", err)
+				} else {
 					// 登记入当前的客户端表，方便查询
+					log.Printf("登记clientId %s->%s", conn.RemoteAddr(), clientId)
 					b.clients[conn] = clientId
+
 				}
 			}
 		}
@@ -245,13 +249,14 @@ func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn) {
 	client.LastHeartbeat = time.Now()
 	if req.ConsumeProgress != nil && len(req.ConsumeProgress) > 0 {
 		for _, c := range req.ConsumeProgress {
-			record, err := b.topicRouteManager.GetTopicTableRecord(req.Topic, req.ConsumerGroup, req.ClientId, c.QueueId)
+			record, err := b.topicRouteManager.GetTopicTableRecord(req.Topic, req.ConsumerGroup, req.ClientId, c.QueueId) //由于0值会丢失，所以模式加一
 			if err != nil {
-				log.Printf("HeartbeatHandler error: %v", err)
+				log.Printf("HeartbeatHandler error: %v, req : %+v", err, req)
 				continue
 			}
 			if c.Offset > record.offset {
-				c.Offset = record.offset
+				log.Printf("HeartbeatHandler 更新offset： %d->%d", c.Offset, record.offset)
+				record.offset = c.Offset
 			}
 		}
 	}
@@ -354,7 +359,7 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn) {
 	for {
 		select {
 		case message := <-consumeQueue.messageChan:
-			log.Printf("开始组转消息， msgId: %s, QueueOffset:%d", message.MsgId, message.QueueOffset)
+			log.Printf("开始组转消息， msgId: %s, QueueId: %d, QueueOffset:%d", message.MsgId, message.QueueId, message.QueueOffset)
 			responseData.Messages = append(responseData.Messages, message)
 		case <-fetchDataChanDone:
 			goto ReturnPullMessageData
@@ -417,6 +422,7 @@ func (b *Broker) ProducerMessage(msg *protocol.Message) error {
 	randQueueId := rand.Intn(len(topic.ConsumeQueues))
 	log.Printf("%s 选择队列 %d", msg.MsgId, randQueueId)
 	consumeQueue := topic.ConsumeQueues[randQueueId]
+	msg.QueueId = int32(consumeQueue.queueId)
 	bodyBytes, err := proto.Marshal(msg)
 	if err != nil {
 		return err

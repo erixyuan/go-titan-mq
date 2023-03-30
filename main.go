@@ -15,7 +15,7 @@ func main() {
 	broker := broker.NewBroker()
 
 	go func() {
-		if false {
+		if true {
 			time.Sleep(5 * time.Second)
 			for i := 0; i < 100; i++ {
 				rand.Seed(time.Now().UnixNano())
