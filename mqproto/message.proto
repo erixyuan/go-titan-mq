@@ -49,7 +49,7 @@ message SubscriptionResponseData {
     string  topic = 1;
     string clientId = 2;
     string consumerGroup = 3;
-    repeated int32 queueIds =4;
+    repeated ConsumeProgress consumeProgress =4;
 }
 
 message PullMessageRequestData {
@@ -74,7 +74,7 @@ message SyncTopicRouteRequestData {
     string clientId = 3;
 }
 message SyncTopicRouteResponseData {
-    repeated int32 queueId =1;
+    repeated ConsumeProgress consumeProgress =1;
 }
 message RegisterConsumerRequestData {
     string topic =1;

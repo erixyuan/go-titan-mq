@@ -29,7 +29,7 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 */
 
 type Broker struct {
-	clients            map[net.Conn]string // 方便从conn找到clientId
+	clients            map[net.Conn]*Client // 方便从conn找到clientId
 	topics             map[string]*Topic
 	topicsLock         sync.Mutex
 	consumerGroupLock  sync.Mutex
@@ -42,7 +42,7 @@ type Broker struct {
 
 func NewBroker() *Broker {
 	broker := Broker{
-		clients:            make(map[net.Conn]string),
+		clients:            make(map[net.Conn]*Client),
 		topics:             make(map[string]*Topic),
 		topicsLock:         sync.Mutex{},
 		consumerGroupLock:  sync.Mutex{},
@@ -100,6 +100,7 @@ func (b *Broker) tcpListenerHandler(listener net.Listener) {
 		fmt.Println("New client connected:", conn.RemoteAddr())
 
 		go b.ListeningClient(conn)
+		go b.CheckHeartbeatHandler()
 		//go b.ProducerMessage()
 	}
 }
@@ -112,7 +113,7 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 			fmt.Printf("Failed to read request from client: %v\n", err)
 			if err == io.EOF {
 				fmt.Printf("%s | %s连接断开了，剔除client", conn.RemoteAddr(), b.clients[conn])
-				b.topicRouteManager.RemoveClient(b.clients[conn])
+				b.topicRouteManager.RemoveClient(b.clients[conn].ClientID)
 			}
 			return
 		}
@@ -185,25 +186,25 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 				return
 			} else {
 				// 注册消费者
-				if err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
+				if client, err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
 					log.Printf("SubscribeHandler error: %", err)
 				} else {
 					// 登记入当前的客户端表，方便查询
-					log.Printf("登记clientId %s->%s", conn.RemoteAddr(), clientId)
-					b.clients[conn] = clientId
+					log.Printf("SubscribeHandler 登记clientId %s->%s", conn.RemoteAddr(), clientId)
+					b.clients[conn] = client
 
 				}
 			}
 		}
 	}
 
-	queueIds := b.topicRouteManager.FindQueueId(req.Topic, req.ConsumerGroup, req.ClientId)
+	queues := b.topicRouteManager.FindQueues(req.Topic, req.ConsumerGroup, req.ClientId)
 	// 返回
 	responseData := protocol.SubscriptionResponseData{
-		Topic:         topicName,
-		ClientId:      clientId,
-		ConsumerGroup: consumerGroupName,
-		QueueIds:      queueIds,
+		Topic:           topicName,
+		ClientId:        clientId,
+		ConsumerGroup:   consumerGroupName,
+		ConsumeProgress: queues,
 	}
 	if bytes, err := proto.Marshal(&responseData); err != nil {
 		log.Printf("SubscribeHandler error: %v", err)
@@ -219,14 +220,37 @@ func (b *Broker) SyncTopicRouteInfo(body []byte, conn net.Conn) {
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 		return
 	}
-	queueIds := b.topicRouteManager.FindQueueId(req.Topic, req.ConsumerGroup, req.ClientId)
+	queues := b.topicRouteManager.FindQueues(req.Topic, req.ConsumerGroup, req.ClientId)
 	resp := protocol.SyncTopicRouteResponseData{}
-	resp.QueueId = queueIds
+	resp.ConsumeProgress = queues
 	if bytes, err := proto.Marshal(&resp); err != nil {
 		log.Printf("SyncTopicRouteInfo error: %v", err)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	} else {
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, bytes, nil)
+	}
+}
+
+// 定时检查客户端的心跳情况，如果超时的话，打上标记
+func (b *Broker) CheckHeartbeatHandler() {
+	for {
+		clearFlag := false
+		for _, c := range b.clients {
+			if c.LastHeartbeat.Add(HeartbeatTimeout).Before(time.Now()) && c.Status == 1 {
+				log.Printf("发现客户端超时了 ClientId:%s", c.ClientID)
+				c.Status = 0
+				clearFlag = true
+				if err := b.topicRouteManager.RemoveClient(c.ClientID); err != nil {
+					log.Printf("删除客户端异常 error: %v", err)
+				} else {
+					delete(b.clients, c.Conn)
+				}
+			}
+		}
+		if clearFlag {
+
+		}
+		time.Sleep(time.Second)
 	}
 }
 
@@ -243,6 +267,7 @@ func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn) {
 	if err != nil {
 		log.Printf("HeartbeatHandler error: %v", err)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, err)
+		return
 	}
 	// 更新客户端的
 	client.Status = 1
@@ -582,7 +607,7 @@ func (b *Broker) GetClient(topicName string, consumerGroupName string, clientId 
 			return nil, ErrConsumerGroupNotExist
 		} else {
 			if client, ok := consumerGroup.Clients[clientId]; !ok {
-				return nil, ErrConsumerGroupNotExist
+				return nil, ErrClientNotExist
 			} else {
 				return client, nil
 			}

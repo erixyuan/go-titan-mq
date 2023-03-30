@@ -3,6 +3,7 @@ package broker
 import (
 	"encoding/json"
 	"errors"
+	"github.com/erixyuan/go-titan-mq/protocol"
 	"io"
 	"io/ioutil"
 	"log"
@@ -87,20 +88,25 @@ func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGrou
 
 // 注册路由信息
 // 新的消费者注册的时候，队列填写为空， 由rebalance重新分配
-func (t *TopicRouteManager) RegisterConsumer(topicName string, consumerGroupName string, clientId string, conn net.Conn) error {
+func (t *TopicRouteManager) RegisterConsumer(topicName string, consumerGroupName string, clientId string, conn net.Conn) (*Client, error) {
 	client := Client{
 		Conn:          conn,
 		ClientID:      clientId,
 		LastHeartbeat: time.Now(),
 		Status:        1,
 	}
-	log.Printf("开始注册消费者；+%v", client)
+	log.Printf("RegisterConsumer 开始注册消费者；+%v", client)
 	t.topics[topicName].consumerGroups[consumerGroupName].Clients[clientId] = &client
-	return t.ReBalanceByRegister(topicName, consumerGroupName)
+	err := t.ReBalanceByRegister(topicName, consumerGroupName)
+	if err != nil {
+		return nil, err
+	}
+	return &client, nil
 }
 
 // 重新分配队列
 func (t *TopicRouteManager) ReBalanceByRegister(topicName string, consumerGroupName string) error {
+	log.Printf("ReBalanceByRegister - 开始重新分配队列")
 	// 获取所有的队列
 	var topicRouteRecords []*TopicRouteRecord
 	for _, record := range t.table {
@@ -270,7 +276,21 @@ func (t *TopicRouteManager) FindQueueId(topicName string, consumerGroupName stri
 	return queueIds
 }
 
-func (t *TopicRouteManager) RemoveClient(clientId string) {
+func (t *TopicRouteManager) FindQueues(topicName string, consumerGroupName string, clientId string) []*protocol.ConsumeProgress {
+	log.Printf("开始查看client:[%s][%s][%s]分配的queue", topicName, consumerGroupName, clientId)
+	var queues []*protocol.ConsumeProgress
+	for _, record := range t.table {
+		if record.topic == topicName && record.consumerGroup == consumerGroupName && record.clientId == clientId {
+			queues = append(queues, &protocol.ConsumeProgress{
+				QueueId: int32(record.queueId),
+				Offset:  record.offset,
+			})
+		}
+	}
+	return queues
+}
+
+func (t *TopicRouteManager) RemoveClient(clientId string) error {
 	log.Println("开始删除Client:%s", clientId)
 	// 删除掉topic中的client
 	log.Println("删除掉topic中的client:%s", clientId)
@@ -289,6 +309,7 @@ func (t *TopicRouteManager) RemoveClient(clientId string) {
 			r.clientId = ""
 		}
 	}
+	return nil
 }
 
 func (t *TopicRouteManager) GetTopicTableRecord(topicName string, consumerGroupName string, clientId string, qid int32) (*TopicRouteRecord, error) {

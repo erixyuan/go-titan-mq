@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -26,11 +27,12 @@ type TitanConsumerClient struct {
 	clientId          string
 	consumerGroupName string
 	topic             string
-	queueIds          []int32
+	queues            []*protocol.ConsumeProgress
 	queueOffset       map[int32]int64
 	pullMessageSize   int32
 	NextConsumeOffset int64 // 下一个消费的offset
 	pullMessageLock   bool
+	queueOffsetLock   sync.Mutex
 }
 
 // 创建客户端
@@ -45,6 +47,7 @@ func (t *TitanConsumerClient) Init(address string, topic string, name string) {
 	t.consumerGroupName = name
 	t.pullMessageSize = 5
 	t.queueOffset = make(map[int32]int64)
+	t.queueOffsetLock = sync.Mutex{}
 }
 
 // 设置超时时间
@@ -157,8 +160,8 @@ func (t *TitanConsumerClient) accept() {
 								log.Printf("收取订阅消息异常 error: %v", err)
 							} else {
 								//log.Printf("收取订阅消息内容: %+v", responseData)
-								if len(responseData.QueueIds) > 0 {
-									t.queueIds = responseData.QueueIds
+								if responseData.ConsumeProgress != nil && len(responseData.ConsumeProgress) > 0 {
+									t.queues = responseData.ConsumeProgress
 								}
 								// 开启同步
 								go t.SendSyncTopicInfo()
@@ -188,39 +191,44 @@ func (t *TitanConsumerClient) accept() {
 func (t *TitanConsumerClient) PullMessage() {
 	for {
 		// 如果还没有注册clientid， 并且获取到的队列为空，继续等待
-		if t.clientId == "" || len(t.queueIds) < 1 || t.pullMessageLock == false {
+		if t.clientId == "" || len(t.queues) < 1 || t.pullMessageLock == false {
 			time.Sleep(3 * time.Second)
 			continue
 		}
 
 		// 随机获取一个队列
 		rand.Seed(time.Now().UnixNano())
-		randQueueIndex := rand.Intn(len(t.queueIds))
-		nextConsumeOffset := t.queueOffset[t.queueIds[randQueueIndex]]
+		randQueueIndex := rand.Intn(len(t.queues))
+		queue := t.queues[randQueueIndex]
 		requestData := protocol.PullMessageRequestData{
 			ClientId:      t.clientId,
 			Topic:         t.topic,
 			ConsumerGroup: t.consumerGroupName,
 			PullSize:      t.pullMessageSize,
-			QueueId:       t.queueIds[randQueueIndex], // 随机获取一个队列
-			Offset:        nextConsumeOffset,
+			QueueId:       queue.QueueId, // 随机获取一个队列
+			Offset:        queue.Offset,
 		}
-		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, nextConsumeOffset, t.queueIds[randQueueIndex], t.pullMessageSize)
+		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, queue.Offset, queue.QueueId, t.pullMessageSize)
 		requestDataBytes, _ := proto.Marshal(&requestData)
 		t.SendCommand(protocol.OpaqueType_PullMessage, requestDataBytes)
 		t.pullMessageLock = false
+
 	}
 
 }
 
 func (t *TitanConsumerClient) ProcessPullMessageHandler(messages []*protocol.Message) {
+	t.queueOffsetLock.Lock()
+	defer t.queueOffsetLock.Unlock()
 	for _, msg := range messages {
 		log.Printf("收到消息: msgId:%+v, QueueId:%d, QueueOffset:%d", msg.MsgId, msg.QueueId, msg.QueueOffset)
 		// 消费完之后，更新当前的消费offset
-		t.NextConsumeOffset = msg.QueueOffset + 1
-		t.queueOffset[msg.QueueId] = msg.QueueOffset + 1
+		for _, q := range t.queues {
+			if q.QueueId == msg.QueueId && msg.QueueOffset >= q.Offset {
+				q.Offset = msg.QueueOffset + 1
+			}
+		}
 	}
-	time.Sleep(time.Second)
 	t.pullMessageLock = true
 }
 
@@ -243,18 +251,18 @@ func (t *TitanConsumerClient) SendSyncTopicInfo() {
 func (t *TitanConsumerClient) SendHeartbeat() {
 	for {
 		if t.clientId != "" {
-			var consumeProgress = make([]*protocol.ConsumeProgress, 0)
-			for queueId, offset := range t.queueOffset {
-				consumeProgress = append(consumeProgress, &protocol.ConsumeProgress{
-					QueueId: queueId, // 由于0值会丢失，所以模式加一
-					Offset:  offset,
-				})
-			}
+			//var consumeProgress = make([]*protocol.ConsumeProgress, 0)
+			//for queueId, offset := range t.queueOffset {
+			//	consumeProgress = append(consumeProgress, &protocol.ConsumeProgress{
+			//		QueueId: queueId, // 由于0值会丢失，所以模式加一
+			//		Offset:  offset,
+			//	})
+			//}
 			req := &protocol.HeartbeatRequestData{
 				Topic:           t.topic,
 				ConsumerGroup:   t.consumerGroupName,
 				ClientId:        t.clientId,
-				ConsumeProgress: consumeProgress,
+				ConsumeProgress: t.queues,
 			}
 			log.Printf("发送心跳请求 %+v", req)
 			bytes, _ := proto.Marshal(req)
@@ -291,8 +299,29 @@ func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {
 		log.Printf("SyncTopicInfoHandler error: %v", err)
 		return
 	}
-	log.Printf("收到同步主题的消息, 队列：%+v", resp.QueueId)
-	t.queueIds = resp.QueueId
+	log.Printf("收到同步主题的消息, 队列：%+v", resp.ConsumeProgress)
+	t.queueOffsetLock.Lock()
+	defer t.queueOffsetLock.Unlock()
+	newQueue := make(map[int32]*protocol.ConsumeProgress)
+	// 这里需要交叉对比, 因为队列可能会增减，先与同步过来的信息对其
+	for _, q := range resp.ConsumeProgress {
+		newQueue[q.QueueId] = q
+	}
+
+	for _, q := range t.queues {
+		if nq, ok := newQueue[q.QueueId]; !ok {
+			continue
+		} else {
+			if nq.Offset > q.Offset {
+				q.Offset = nq.Offset // 取最大的offset
+			}
+		}
+	}
+	result := make([]*protocol.ConsumeProgress, 0)
+	for _, q := range newQueue {
+		result = append(result, q)
+	}
+	t.queues = result
 }
 
 func GenerateSerialNumber(prefix string) string {
