@@ -7,3 +7,5 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	google.golang.org/protobuf v1.26.0
 )
+
+require github.com/google/uuid v1.3.0 // indirect

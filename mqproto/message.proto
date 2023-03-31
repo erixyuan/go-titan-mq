@@ -18,6 +18,8 @@ enum OpaqueType {
     RegisterConsumer = 5;
     // 心跳
     Heartbeat = 6;
+    // 同步消费进去
+    SyncConsumeOffset = 7;
 }
 
 message RemotingCommandHeader{
@@ -29,6 +31,7 @@ message RemotingCommandHeader{
     int32 Flag = 3;
     // 备注信息
     string remark = 4;
+
 }
 
 
@@ -36,6 +39,7 @@ message RemotingCommand{
     RemotingCommandType type =1;
     RemotingCommandHeader header =2;
     bytes body =3;
+    string requestId = 4;
 }
 
 message SubscriptionRequestData {
@@ -65,13 +69,21 @@ message PullMessageResponseData {
     string topic =1;
     string consumerGroup = 2;
     int32 size = 3;
-    repeated Message messages = 4;
+    int32 queueId =4;
+    repeated Message messages = 5;
 }
 
 message SyncTopicRouteRequestData {
     string topic =1;
     string consumerGroup = 2;
     string clientId = 3;
+}
+message SyncConsumeOffsetRequestData {
+    string topic =1;
+    string consumerGroup = 2;
+    string clientId = 3;
+    int32 queueId = 4;
+    int64 offset =5 ;
 }
 message SyncTopicRouteResponseData {
     repeated ConsumeProgress consumeProgress =1;
@@ -93,7 +105,6 @@ message HeartbeatRequestData {
     string topic =1;
     string consumerGroup = 2;
     string clientId = 3;
-    repeated ConsumeProgress consumeProgress = 4;
 }
 
 

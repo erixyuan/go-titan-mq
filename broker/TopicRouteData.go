@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"sync"
@@ -19,11 +18,12 @@ var (
 )
 
 type TopicRouteRecord struct {
-	topic         string
-	consumerGroup string
-	queueId       int
-	clientId      string
-	offset        int64
+	topic           string
+	consumerGroup   string
+	queueId         int
+	clientId        string
+	offset          int64
+	lastConsumeTime time.Time
 }
 
 type consumerGroupInfo struct {
@@ -97,55 +97,7 @@ func (t *TopicRouteManager) RegisterConsumer(topicName string, consumerGroupName
 	}
 	log.Printf("RegisterConsumer 开始注册消费者；+%v", client)
 	t.topics[topicName].consumerGroups[consumerGroupName].Clients[clientId] = &client
-	err := t.ReBalanceByRegister(topicName, consumerGroupName)
-	if err != nil {
-		return nil, err
-	}
 	return &client, nil
-}
-
-// 重新分配队列
-func (t *TopicRouteManager) ReBalanceByRegister(topicName string, consumerGroupName string) error {
-	log.Printf("ReBalanceByRegister - 开始重新分配队列")
-	// 获取所有的队列
-	var topicRouteRecords []*TopicRouteRecord
-	for _, record := range t.table {
-		if record.topic == topicName && record.consumerGroup == consumerGroupName {
-			topicRouteRecords = append(topicRouteRecords, record)
-		}
-	}
-
-	// 获取正常可用的客户端
-	var clients []*Client
-
-	for _, c := range t.topics[topicName].consumerGroups[consumerGroupName].Clients {
-		if c.Status == 1 {
-			clients = append(clients, c)
-		}
-	}
-	topicRouteRecordsSize := len(topicRouteRecords)
-	clientsSize := len(clients)
-	log.Printf("ReBalanceByRegister - topicRouteRecordsSize：%d, clientsSize:%d", topicRouteRecordsSize, clientsSize)
-	//重新分配
-	//分配策略: 获取现在所有的消费组中所有的clientId，做平均分配
-	var targetClients []*Client
-	// 如果队列的数量比客户端多，先每个客户端分配一个，然后随机冲clients抽计入进去
-	// todo 简单的分配策略
-	if topicRouteRecordsSize >= clientsSize {
-		targetClients = append(targetClients, clients...)
-		for i := 0; i < topicRouteRecordsSize-clientsSize; i++ {
-			targetIndex := rand.Intn(len(clients))
-			targetClients = append(targetClients, clients[targetIndex])
-		}
-	} else {
-		for i := 0; i < clientsSize; i++ {
-			targetClients = append(targetClients, clients[i])
-		}
-	}
-	for i, r := range topicRouteRecords {
-		r.clientId = targetClients[i].ClientID
-	}
-	return nil
 }
 
 // 获取当前clientId 的分配队列
@@ -195,7 +147,7 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 							topic:         topicName,
 							consumerGroup: consumerGroupName,
 							queueId:       qid,
-							clientId:      "",
+							clientId:      ReBalance,
 							offset:        offset,
 						})
 					}
@@ -290,29 +242,7 @@ func (t *TopicRouteManager) FindQueues(topicName string, consumerGroupName strin
 	return queues
 }
 
-func (t *TopicRouteManager) RemoveClient(clientId string) error {
-	log.Println("开始删除Client:%s", clientId)
-	// 删除掉topic中的client
-	log.Println("删除掉topic中的client:%s", clientId)
-	for _, topic := range t.topics {
-		for _, c := range topic.consumerGroups {
-			if _, ok := c.Clients[clientId]; ok {
-				// 删除
-				delete(c.Clients, clientId)
-			}
-		}
-	}
-	log.Println("删除topicTable中的client:%s", clientId)
-	// 删除topicTable中的client
-	for _, r := range t.table {
-		if r.clientId == clientId {
-			r.clientId = ""
-		}
-	}
-	return nil
-}
-
-func (t *TopicRouteManager) GetTopicTableRecord(topicName string, consumerGroupName string, clientId string, qid int32) (*TopicRouteRecord, error) {
+func (t *TopicRouteManager) GetTopicTableRecord(topicName string, consumerGroupName string, qid int32, clientId string) (*TopicRouteRecord, error) {
 	for _, record := range t.table {
 		if record.topic == topicName && record.consumerGroup == consumerGroupName && record.clientId == clientId && int32(record.queueId) == qid {
 			return record, nil
@@ -326,4 +256,14 @@ func (t *TopicRouteManager) AutoRefresh() {
 		t.Flush()
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func (t *TopicRouteManager) GetAllConsumerGroupRecord(topicName string, consumerGroupName string) []*TopicRouteRecord {
+	ret := make([]*TopicRouteRecord, 0)
+	for _, record := range t.table {
+		if record.topic == topicName && record.consumerGroup == consumerGroupName {
+			ret = append(ret, record)
+		}
+	}
+	return ret
 }

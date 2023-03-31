@@ -1,11 +1,13 @@
 package sdk
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/broker"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"math/rand"
@@ -16,6 +18,7 @@ import (
 
 var ok = "ok"
 var subscribe = "subscribe"
+var requestIdKey = "requestId"
 
 type TitanConsumerClient struct {
 	address           string
@@ -31,8 +34,9 @@ type TitanConsumerClient struct {
 	queueOffset       map[int32]int64
 	pullMessageSize   int32
 	NextConsumeOffset int64 // 下一个消费的offset
-	pullMessageLock   bool
-	queueOffsetLock   sync.Mutex
+	pullMessageLock   bool  // 拉取消息锁，保证消费完当前拉取的数据，再进行下一次拉取
+	// 消费进度的锁，两个地方会用到，一是同步主题消息的时候会读取，二是拉取消息的时候要先获取当前的进度锁。假设在拉取的时候，进度被重置了，读取到的可能就不是最新的了
+	queueOffsetLock sync.Mutex
 }
 
 // 创建客户端
@@ -91,7 +95,7 @@ func (t *TitanConsumerClient) Subscribe() error {
 	if bodyBytes, err := proto.Marshal(&body); err != nil {
 		log.Printf("Subscribe error: %v", err)
 	} else {
-		go t.SendCommand(protocol.OpaqueType_Subscription, bodyBytes)
+		t.SendCommand(protocol.OpaqueType_Subscription, bodyBytes)
 	}
 	log.Printf("发送订阅消息成功，等待回复 %+v", body)
 	return nil
@@ -178,7 +182,7 @@ func (t *TitanConsumerClient) accept() {
 							if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
 								log.Fatal("remotingCommandResp error: %v", err)
 							} else {
-								t.ProcessPullMessageHandler(responseData.Messages)
+								t.ProcessPullMessageHandler(&responseData, remotingCommandResp.RequestId)
 							}
 						}
 					}
@@ -188,11 +192,14 @@ func (t *TitanConsumerClient) accept() {
 	}()
 }
 
+/**
+用自旋的方式，是因为有可能broker挂了，需要不停的重试
+*/
 func (t *TitanConsumerClient) PullMessage() {
 	for {
 		// 如果还没有注册clientid， 并且获取到的队列为空，继续等待
 		if t.clientId == "" || len(t.queues) < 1 || t.pullMessageLock == false {
-			time.Sleep(3 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 
@@ -211,38 +218,64 @@ func (t *TitanConsumerClient) PullMessage() {
 		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, queue.Offset, queue.QueueId, t.pullMessageSize)
 		requestDataBytes, _ := proto.Marshal(&requestData)
 		t.SendCommand(protocol.OpaqueType_PullMessage, requestDataBytes)
-		t.pullMessageLock = false
+		t.pullMessageLock = false // 加上锁，等待处理了上一次的消息之后才发下一次请求
 
 	}
 
 }
 
-func (t *TitanConsumerClient) ProcessPullMessageHandler(messages []*protocol.Message) {
+func (t *TitanConsumerClient) ProcessPullMessageHandler(resp *protocol.PullMessageResponseData, requestId string) {
 	t.queueOffsetLock.Lock()
-	defer t.queueOffsetLock.Unlock()
-	for _, msg := range messages {
-		log.Printf("收到消息: msgId:%+v, QueueId:%d, QueueOffset:%d", msg.MsgId, msg.QueueId, msg.QueueOffset)
+	queueId := resp.QueueId
+	var offset int64
+	for _, msg := range resp.Messages {
+		log.Printf("收到消息 - %s: msgId:%+v, QueueId:%d, QueueOffset:%d", requestId, msg.MsgId, msg.QueueId, msg.QueueOffset)
 		// 消费完之后，更新当前的消费offset
 		for _, q := range t.queues {
+			if q.Offset > offset {
+				offset = q.Offset
+			}
 			if q.QueueId == msg.QueueId && msg.QueueOffset >= q.Offset {
 				q.Offset = msg.QueueOffset + 1
 			}
 		}
 	}
-	t.pullMessageLock = true
+	t.queueOffsetLock.Unlock()
+	// 发送确认消息
+	go t.SyncConsumeOffset(queueId, offset)
+	time.Sleep(2 * time.Second)
+	t.pullMessageLock = true //解锁，可以继续拉数据了
 }
 
-// 每5秒同步一次信息
+// 同步队列的消费进度
+func (t *TitanConsumerClient) SyncConsumeOffset(queueId int32, offset int64) {
+
+	req := &protocol.SyncConsumeOffsetRequestData{
+		Topic:         t.topic,
+		ConsumerGroup: t.consumerGroupName,
+		ClientId:      t.clientId,
+		QueueId:       queueId,
+		Offset:        offset,
+	}
+	log.Printf("发送同步消费进度:%+v", req)
+	bytes, _ := proto.Marshal(req)
+	t.SendCommand(protocol.OpaqueType_SyncConsumeOffset, bytes)
+}
+
+// 同步队列的消费进度
 func (t *TitanConsumerClient) SendSyncTopicInfo() {
 	for {
-		log.Printf("发送同步主题消息的请求")
+		requestId := uuid.New().String()
+		ctx := context.Background()
+		ctx = context.WithValue(ctx, requestIdKey, requestId)
+		log.Printf("发送同步主题消息的请求 %s", requestId)
 		req := &protocol.SyncTopicRouteRequestData{
 			Topic:         t.topic,
 			ConsumerGroup: t.consumerGroupName,
 			ClientId:      t.clientId,
 		}
 		bytes, _ := proto.Marshal(req)
-		t.SendCommand(protocol.OpaqueType_SyncTopicRouteInfo, bytes)
+		t.SendCommandWithRequestId(protocol.OpaqueType_SyncTopicRouteInfo, bytes, requestId)
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -259,10 +292,9 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 			//	})
 			//}
 			req := &protocol.HeartbeatRequestData{
-				Topic:           t.topic,
-				ConsumerGroup:   t.consumerGroupName,
-				ClientId:        t.clientId,
-				ConsumeProgress: t.queues,
+				Topic:         t.topic,
+				ConsumerGroup: t.consumerGroupName,
+				ClientId:      t.clientId,
 			}
 			log.Printf("发送心跳请求 %+v", req)
 			bytes, _ := proto.Marshal(req)
@@ -273,24 +305,58 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 }
 
 func (t *TitanConsumerClient) SendCommand(opaque protocol.OpaqueType, dataBytes []byte) {
-	remotingCommandReq := protocol.RemotingCommand{
-		Type: protocol.RemotingCommandType_RequestCommand,
-		Header: &protocol.RemotingCommandHeader{
-			Code:   0,
-			Opaque: opaque,
-			Flag:   0,
-			Remark: "",
-		},
-		Body: dataBytes,
-	}
-	remotingCommandBytes, _ := proto.Marshal(&remotingCommandReq)
+	go func() {
+		remotingCommandReq := protocol.RemotingCommand{
+			Type: protocol.RemotingCommandType_RequestCommand,
+			Header: &protocol.RemotingCommandHeader{
+				Code:   0,
+				Opaque: opaque,
+				Flag:   0,
+				Remark: "",
+			},
+			Body: dataBytes,
+		}
+		// 从上下文中获取全局变量
+		if value, ok := context.Background().Value(requestIdKey).(string); ok {
+			remotingCommandReq.RequestId = value
+		}
+		remotingCommandBytes, _ := proto.Marshal(&remotingCommandReq)
 
-	// 发送请求
-	_, err := t.conn.Write(remotingCommandBytes)
-	if err != nil {
-		log.Printf("发送请求异常: %v", err)
-		return
-	}
+		// 发送请求
+		_, err := t.conn.Write(remotingCommandBytes)
+		if err != nil {
+			log.Printf("发送请求异常: %v", err)
+			return
+		}
+	}()
+
+}
+func (t *TitanConsumerClient) SendCommandWithRequestId(opaque protocol.OpaqueType, dataBytes []byte, requestId string) {
+	go func() {
+
+		remotingCommandReq := protocol.RemotingCommand{
+			Type: protocol.RemotingCommandType_RequestCommand,
+			Header: &protocol.RemotingCommandHeader{
+				Code:   0,
+				Opaque: opaque,
+				Flag:   0,
+				Remark: "",
+			},
+			Body: dataBytes,
+		}
+		// 从上下文中获取全局变量
+		remotingCommandReq.RequestId = requestId
+		remotingCommandBytes, _ := proto.Marshal(&remotingCommandReq)
+
+		// 发送请求
+		_, err := t.conn.Write(remotingCommandBytes)
+		if err != nil {
+			log.Printf("发送请求异常: %v", err)
+			return
+		}
+		log.Printf("SendCommandWithRequestId - %s 发送请求成功 ", requestId)
+	}()
+
 }
 
 func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {

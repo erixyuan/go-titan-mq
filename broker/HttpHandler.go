@@ -2,14 +2,19 @@ package broker
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
+	"github.com/erixyuan/go-titan-mq/tools"
 	"github.com/julienschmidt/httprouter"
 	"log"
+	"math/rand"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 type HttpHandler struct {
-	topicRouteManager *TopicRouteManager
+	broker *Broker
 }
 
 func (h *HttpHandler) Index(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
@@ -28,7 +33,7 @@ func (h *HttpHandler) AddTopic(writer http.ResponseWriter, request *http.Request
 	// user已经成功解析
 	// 这里可以将user存储到数据库中，或者做其他操作
 	log.Printf("新增主题: %+v", addTopicReq)
-	err = h.topicRouteManager.RegisterTopic(addTopicReq.GetTopicName())
+	err = h.broker.topicRouteManager.RegisterTopic(addTopicReq.GetTopicName())
 	if err != nil {
 		log.Printf("AddTopic error: %v", err)
 		return
@@ -55,10 +60,12 @@ func (h *HttpHandler) AddConsumerGroup(writer http.ResponseWriter, request *http
 		h.Return(writer, "参数异常")
 		return
 	}
-	err = h.topicRouteManager.RegisterConsumerGroup(req.GetTopicName(), req.GetGroupName())
+	err = h.broker.topicRouteManager.RegisterConsumerGroup(req.GetTopicName(), req.GetGroupName())
 	if err != nil {
 		log.Printf("AddConsumerGroup error: %v", err)
 		h.Return(writer, err.Error())
+	} else {
+		go h.broker.doReBalance(req.TopicName, req.GroupName)
 	}
 	h.Return(writer, nil)
 }
@@ -78,7 +85,7 @@ func (h *HttpHandler) Return(writer http.ResponseWriter, data any) {
 }
 
 func (h *HttpHandler) FetchTopicDb(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
-	bytes, err := json.Marshal(h.topicRouteManager.topicDb)
+	bytes, err := json.Marshal(h.broker.topicRouteManager.topicDb)
 	if err != nil {
 		log.Printf("FetchTopicDb error %+v", err)
 	} else {
@@ -88,7 +95,7 @@ func (h *HttpHandler) FetchTopicDb(writer http.ResponseWriter, request *http.Req
 }
 
 func (h *HttpHandler) FetchTopicData(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
-	for topicName, t := range h.topicRouteManager.topics {
+	for topicName, t := range h.broker.topicRouteManager.topics {
 		log.Printf("主题名称：%s", topicName)
 		for _, c := range t.ConsumeQueues {
 			log.Printf("队列：%d", c.queueId)
@@ -97,7 +104,32 @@ func (h *HttpHandler) FetchTopicData(writer http.ResponseWriter, request *http.R
 }
 
 func (h *HttpHandler) FetchTopicTable(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
-	for _, r := range h.topicRouteManager.table {
+	for _, r := range h.broker.topicRouteManager.table {
 		log.Printf("%s | %s | %d | %d | %s", r.topic, r.consumerGroup, r.queueId, r.offset, r.clientId)
 	}
+}
+
+func (h *HttpHandler) ProduceMessage(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		for i := 0; i < 100; i++ {
+			rand.Seed(time.Now().UnixNano())
+			intn := rand.Intn(2 * 4 * 1024)
+			body := make([]byte, intn)
+			body = append(body, []byte(fmt.Sprintf("123-%d", i))...)
+			message := protocol.Message{
+				Topic:          "news",
+				Body:           body,
+				BornTimestamp:  12312312,
+				StoreTimestamp: 0,
+				MsgId:          tools.GenerateSerialNumber("P") + "--" + strconv.Itoa(i),
+				ProducerGroup:  "123",
+				ConsumerGroup:  "123",
+			}
+			log.Printf("开始写入文件%d----------------------------", i)
+			// 写文件
+			h.broker.ProducerMessage(&message)
+			time.Sleep(1 * time.Second)
+		}
+	}()
 }
