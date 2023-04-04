@@ -8,8 +8,8 @@ import (
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 	"io"
-	"log"
 	"math/rand"
 	"net"
 	"sync"
@@ -137,8 +137,8 @@ func (t *TitanConsumerClient) accept() {
 			if err != nil {
 				if err == io.EOF {
 					for {
-						fmt.Println("Connection closed:", err)
-						fmt.Println("Connection retry:")
+						log.Error("Connection closed:", err)
+						log.Error("Connection retry")
 						if err = t.Start(); err != nil {
 							log.Printf("Connection retry: error %+v", err)
 						} else {
@@ -249,7 +249,7 @@ func (t *TitanConsumerClient) ProcessPullMessageHandler(resp *protocol.PullMessa
 
 // 同步队列的消费进度
 func (t *TitanConsumerClient) SyncConsumeOffset(queueId int32, offset int64) {
-
+	requestId := uuid.New().String()
 	req := &protocol.SyncConsumeOffsetRequestData{
 		Topic:         t.topic,
 		ConsumerGroup: t.consumerGroupName,
@@ -257,9 +257,9 @@ func (t *TitanConsumerClient) SyncConsumeOffset(queueId int32, offset int64) {
 		QueueId:       queueId,
 		Offset:        offset,
 	}
-	log.Printf("发送同步消费进度:%+v", req)
+	log.Printf("SyncConsumeOffset 发送同步消费进度 -  [requestId:%s] [%+v]", requestId, req)
 	bytes, _ := proto.Marshal(req)
-	t.SendCommand(protocol.OpaqueType_SyncConsumeOffset, bytes)
+	t.SendCommandWithRequestId(protocol.OpaqueType_SyncConsumeOffset, bytes, requestId)
 }
 
 // 同步队列的消费进度
@@ -291,14 +291,15 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 			//		Offset:  offset,
 			//	})
 			//}
+			requestId := uuid.New().String()
 			req := &protocol.HeartbeatRequestData{
 				Topic:         t.topic,
 				ConsumerGroup: t.consumerGroupName,
 				ClientId:      t.clientId,
 			}
-			log.Printf("发送心跳请求 %+v", req)
+			log.Printf("SendHeartbeat - 发送心跳请求 - [requestId:requestId][%+v]", req)
 			bytes, _ := proto.Marshal(req)
-			t.SendCommand(protocol.OpaqueType_Heartbeat, bytes)
+			t.SendCommandWithRequestId(protocol.OpaqueType_Heartbeat, bytes, requestId)
 		}
 		time.Sleep(5 * time.Second)
 	}

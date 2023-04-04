@@ -2,15 +2,14 @@ package broker
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/erixyuan/go-titan-mq/tools"
 	"github.com/golang/protobuf/proto"
 	"github.com/julienschmidt/httprouter"
+	log "github.com/sirupsen/logrus"
 	"io"
-	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -27,6 +26,8 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 在处理 publish 命令时，需要注意如果向某个订阅者发送消息失败了，需要将该订阅者从该主题对应的订阅者集合中删除。
 
 */
+
+var Log = log.New()
 
 type Broker struct {
 	clients            map[net.Conn]*Client // 方便从conn找到clientId
@@ -55,7 +56,7 @@ func NewBroker() *Broker {
 }
 
 func (b *Broker) Start(port int) error {
-	fmt.Printf("Broker 开始初始化................................")
+	Log.Infof("Broker 开始初始化................................")
 	b.init()
 	tcpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -63,14 +64,14 @@ func (b *Broker) Start(port int) error {
 	}
 	defer tcpListener.Close()
 	// 开启tcp的监听
-	fmt.Printf("Broker 开始初始化监听端口 port %d\n", port)
+	Log.Infof("Broker 开始初始化监听端口 port %d\n", port)
 	go b.tcpListenerHandler(tcpListener)
 
 	// 监听本地的HTTP连接
 	httpListener, _ := net.Listen("tcp", ":9090")
 	defer httpListener.Close()
 
-	fmt.Println("开始创建http服务")
+	Log.Infof("开始创建http服务")
 	// 创建HTTP服务器
 	router := httprouter.New()
 	handler := HttpHandler{
@@ -87,7 +88,7 @@ func (b *Broker) Start(port int) error {
 	// 启动两个监听器
 	err = http.ListenAndServe(":9091", router)
 	if err != nil {
-		log.Fatal(err)
+		Log.Fatal(err)
 	}
 	select {}
 	return nil
@@ -97,14 +98,13 @@ func (b *Broker) tcpListenerHandler(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Println("Error accepting connection:", err.Error())
+			Log.Errorf("监听客户端异常:%+v", err)
 			continue
 		}
-		fmt.Println("New client connected:", conn.RemoteAddr())
+		Log.Infof("新客户端连接成功:%s", conn.RemoteAddr())
 
 		go b.ListeningClient(conn)
 		go b.CheckHeartbeatHandler()
-		//go b.ProducerMessage()
 	}
 }
 
@@ -113,27 +113,28 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 		buf := make([]byte, 1024*4)
 		n, err := conn.Read(buf)
 		if err != nil {
-			fmt.Printf("Failed to read request from client: %v\n", err)
+			Log.Errorf("读取客户端数据异常: %v\n", err)
 			if err == io.EOF {
-				fmt.Printf("%s | %s连接断开了，剔除client", conn.RemoteAddr(), b.clients[conn])
+				Log.Infof("客户端连接断开：%s | %s，剔除client", conn.RemoteAddr(), b.clients[conn])
 				b.RemoveClient(b.clients[conn].ClientID)
-
 			}
 			return
 		}
 		remotingCommand := &protocol.RemotingCommand{}
 		err = proto.Unmarshal(buf[:n], remotingCommand)
 		if err != nil {
-			log.Printf("收到请求体，内容异常: error +%v", err)
+			Log.Errorf("收到请求体，内容异常: error +%v", err)
 			continue
 		}
 		if remotingCommand.Type == protocol.RemotingCommandType_RequestCommand {
-			log.Printf("收到请求：%+v", &remotingCommand.Header)
+			Log.Debugf("收到请求：%+v", *remotingCommand.Header)
 			// 如果是请求
 			switch remotingCommand.Header.Opaque {
 			case protocol.OpaqueType_Heartbeat:
-				go b.HeartbeatHandler(remotingCommand.Body, conn)
+				Log.Debugf("收到心跳请求 %s", remotingCommand.RequestId)
+				go b.HeartbeatHandler(remotingCommand.Body, conn, remotingCommand.RequestId)
 			case protocol.OpaqueType_SyncTopicRouteInfo:
+				Log.Debugf("收到同步路由信息请求 %s", remotingCommand.RequestId)
 				// 同步路由信息
 				go b.SyncTopicRouteInfoHandler(remotingCommand.Body, conn, remotingCommand.RequestId)
 			case protocol.OpaqueType_Subscription:
@@ -145,12 +146,12 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 			case protocol.OpaqueType_PullMessage:
 				go b.PullMessageHandler(remotingCommand.Body, conn, remotingCommand.RequestId)
 			case protocol.OpaqueType_SyncConsumeOffset:
-				go b.SyncConsumeOffsetHandler(remotingCommand.Body, conn)
+				go b.SyncConsumeOffsetHandler(remotingCommand.Body, conn, remotingCommand.RequestId)
 
 			}
 		} else if remotingCommand.Type == protocol.RemotingCommandType_ResponseCommand {
 			// 如果是响应，例如消息确认
-			log.Printf("收到响应：%+v", remotingCommand.Header)
+			Log.Debugf("收到响应：%+v", remotingCommand.Header)
 		}
 	}
 }
@@ -165,13 +166,12 @@ Consumer是在向Broker订阅消息时，将ClientId信息发送给Broker的。
 并在消息头中携带Consumer的ClientId信息。因此，Consumer的ClientId信息是在向Broker订阅消息的阶段传递给Broker的。
 */
 func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
-	log.Printf("收到订阅请求")
 	req := protocol.SubscriptionRequestData{}
 	if err := proto.Unmarshal(body, &req); err != nil {
 		b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrRequest)
 		return
 	}
-	log.Printf("收到订阅请求，数据为：%+v", req)
+	Log.Infof("收到订阅请求，数据为：%+v", req)
 	topicName := req.Topic
 	clientId := req.ClientId
 	consumerGroupName := req.ConsumerGroup
@@ -182,22 +182,22 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 	} else {
 		// 检查消费组是否存在
 		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
-			log.Printf("SubscribeHandler error: 消费组[%s]不存在", consumerGroupName)
+			Log.Infof("SubscribeHandler error: 消费组[%s]不存在", consumerGroupName)
 			b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrConsumerGroupNotExist)
 			return
 		} else {
 			if _, ok := consumerGroup.Clients[clientId]; ok {
 				// 已经存在了就返回订阅异常
-				log.Printf("SubscribeHandler error: 消费组中的ClientId已经存在")
+				Log.Infof("SubscribeHandler error: 消费组中的ClientId已经存在")
 				b.Return(conn, protocol.OpaqueType_Subscription, nil, ErrClientExist)
 				return
 			} else {
 				// 注册消费者
 				if client, err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
-					log.Printf("SubscribeHandler error: %", err)
+					Log.Infof("SubscribeHandler error: %+v", err)
 				} else {
 					// 登记入当前的客户端表，方便查询
-					log.Printf("SubscribeHandler 登记clientId %s->%s", conn.RemoteAddr(), clientId)
+					Log.Infof("SubscribeHandler 登记clientId %s->%s", conn.RemoteAddr(), clientId)
 					b.clients[conn] = client
 					b.reBalance(topicName, consumerGroupName)
 				}
@@ -214,23 +214,23 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 		ConsumeProgress: queues,
 	}
 	if bytes, err := proto.Marshal(&responseData); err != nil {
-		log.Printf("SubscribeHandler error: %v", err)
+		Log.Infof("SubscribeHandler error: %v", err)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	} else {
 		b.Return(conn, protocol.OpaqueType_Subscription, bytes, nil)
 	}
 
 }
-func (b *Broker) SyncConsumeOffsetHandler(body []byte, conn net.Conn) {
+func (b *Broker) SyncConsumeOffsetHandler(body []byte, conn net.Conn, requestId string) {
 	req := &protocol.SyncConsumeOffsetRequestData{}
 	if err := proto.Unmarshal(body, req); err != nil {
 		b.Return(conn, protocol.OpaqueType_SyncConsumeOffset, nil, ErrRequest)
 		return
 	}
-
+	Log.Infof("SyncConsumeOffsetHandler 收到同步消费进度请求 - [requestId:%s][clientId:%s][主题:%s][消费组:%s][队列:%d][偏移量:%d]", requestId, req.ClientId, req.Topic, req.ConsumerGroup, req.QueueId, req.Offset)
 	// table中标记已经完整这一批消费
 	if record, err := b.topicRouteManager.GetTopicTableRecord(req.Topic, req.ConsumerGroup, req.QueueId, req.ClientId); err != nil {
-		log.Printf("SyncTopicRouteInfoHandler error: %v", err)
+		Log.Infof("SyncTopicRouteInfoHandler - [requestId:%s] [error: %v]", requestId, err)
 		return
 	} else {
 		if req.Offset > record.offset {
@@ -250,18 +250,18 @@ func (b *Broker) SyncTopicRouteInfoHandler(body []byte, conn net.Conn, requestId
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 		return
 	}
-	log.Printf("SyncTopicRouteInfoHandler %s - 开始处理同步主题路由信息请求 %+v", requestId, req)
+	Log.Infof("SyncTopicRouteInfoHandler %s - 开始处理同步主题路由信息请求 %+v", requestId, req)
 	queues := b.topicRouteManager.FindQueues(req.Topic, req.ConsumerGroup, req.ClientId)
 	resp := protocol.SyncTopicRouteResponseData{}
 	resp.ConsumeProgress = queues
 	if bytes, err := proto.Marshal(&resp); err != nil {
-		log.Printf("SyncTopicRouteInfoHandler error: %v", err)
+		Log.Infof("SyncTopicRouteInfoHandler error: %v", err)
 		b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	} else {
 		b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_SyncTopicRouteInfo, bytes, nil)
-		log.Printf("SyncTopicRouteInfoHandler - ")
+		Log.Infof("SyncTopicRouteInfoHandler - ")
 	}
-	log.Printf("SyncTopicRouteInfoHandler %s - 处理结束 %", requestId)
+	Log.Infof("SyncTopicRouteInfoHandler %s - 处理结束", requestId)
 }
 
 // 定时检查客户端的心跳情况，如果超时的话，打上标记
@@ -270,11 +270,11 @@ func (b *Broker) CheckHeartbeatHandler() {
 		clearFlag := false
 		for _, c := range b.clients {
 			if c.LastHeartbeat.Add(HeartbeatTimeout).Before(time.Now()) && c.Status == 1 {
-				log.Printf("发现客户端超时了 ClientId:%s", c.ClientID)
+				Log.Infof("发现客户端超时了 ClientId:%s", c.ClientID)
 				c.Status = 0
 				clearFlag = true
 				if err := b.RemoveClient(c.ClientID); err != nil {
-					log.Printf("删除客户端异常 error: %v", err)
+					Log.Infof("删除客户端异常 error: %v", err)
 				} else {
 					delete(b.clients, c.Conn)
 				}
@@ -287,52 +287,42 @@ func (b *Broker) CheckHeartbeatHandler() {
 	}
 }
 
-func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn) {
+func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn, requestId string) {
 	req := &protocol.HeartbeatRequestData{}
 	if err := proto.Unmarshal(body, req); err != nil {
+		Log.Infof("HeartbeatHandler - error: [requestId:%s] %v", requestId, err)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 		return
 	}
 	if req.Topic == "" || req.ConsumerGroup == "" || req.ClientId == "" {
+		Log.Infof("HeartbeatHandler - error: [requestId:%s] 参数异常", requestId)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, ErrRequest)
 	}
 	client, err := b.GetClient(req.Topic, req.ConsumerGroup, req.ClientId)
 	if err != nil {
-		log.Printf("HeartbeatHandler error: %v", err)
+		Log.Infof("HeartbeatHandler error: [requestId:%s] %v", requestId, err)
 		b.Return(conn, protocol.OpaqueType_SyncTopicRouteInfo, nil, err)
 		return
 	}
 	// 更新客户端的
 	client.Status = 1
 	client.LastHeartbeat = time.Now()
-	//if req.ConsumeProgress != nil && len(req.ConsumeProgress) > 0 {
-	//	for _, c := range req.ConsumeProgress {
-	//		record, err := b.topicRouteManager.GetTopicTableRecord(req.Topic, req.ConsumerGroup, c.QueueId, req.ClientId) //由于0值会丢失，所以模式加一
-	//		if err != nil {
-	//			log.Printf("HeartbeatHandler error: %v, req : %+v", err, req)
-	//			continue
-	//		}
-	//		if c.Offset > record.offset {
-	//			log.Printf("HeartbeatHandler 更新offset： %d->%d", c.Offset, record.offset)
-	//			record.offset = c.Offset
-	//		}
-	//	}
-	//}
+	Log.Infof("HeartbeatHandler - 心跳更新成功 [requestId:%s] [%+v]", requestId, *client)
 }
 
 /**
 找到对应的channel，进行读取
 */
 func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string) {
-	log.Printf("PullMessageHandler %s - 收到拉取消息的请求", requestId)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	data := &protocol.PullMessageRequestData{}
 	if err := proto.Unmarshal(body, data); err != nil {
-		log.Printf("SubscribeHandler error: %v", err)
+		Log.Errorf("SubscribeHandler error: %v", err)
 		return
 	}
-
+	Log.Infof("PullMessageHandler - 收到拉取消息的请求 [requestId:%s]", requestId)
 	topicName := data.Topic
 	clientId := data.ClientId
 	consumerGroupName := data.ConsumerGroup
@@ -345,7 +335,7 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 	responseData.ConsumerGroup = consumerGroupName
 	responseData.QueueId = queueId
 	responseData.Messages = make([]*protocol.Message, 0)
-	log.Printf("收到拉取数据请求：%+v", data)
+	Log.Debugf("收到拉取数据请求：%+v", data)
 	// 检查topic是否存在
 	if topic, ok := b.topics[topicName]; !ok {
 		//b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
@@ -353,12 +343,12 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 	} else {
 		// 检查消费组是否存在
 		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
-			log.Printf("PullMessageHandler error: 消费组不存在")
+			Log.Infof("PullMessageHandler error: 消费组不存在")
 			//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrConsumerGroupNotExist)
 			goto ReturnPullMessageData
 		} else {
 			if _, ok := consumerGroup.Clients[clientId]; !ok {
-				log.Printf("PullMessageHandler error: ClientId不存在")
+				Log.Errorf("PullMessageHandler error: ClientId不存在")
 				//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrRequest)
 				goto ReturnPullMessageData
 			}
@@ -366,14 +356,14 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 			queueIds := b.topicRouteManager.FindQueueId(topicName, consumerGroup.GroupName, clientId)
 			// 判断队列Id是否是分配的
 			if !tools.ContainsInt(queueIds, queueId) {
-				log.Printf("PullMessageHandler error: 队列不存在")
+				Log.Errorf("PullMessageHandler error: 队列不存在")
 				//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrQueueId)
 				goto ReturnPullMessageData
 			} else {
 				// 找到之前分配的channel
-				log.Printf("PullMessageHandler 获取分配的队列ID：%d", queueId)
+				Log.Debugf("PullMessageHandler 获取分配的队列ID：%d", queueId)
 				consumeQueue := b.topics[topicName].ConsumeQueues[queueId]
-				log.Printf("ClientId: %s 要拉取 %d 条数据, offset:%d,  开始监听queue %d", clientId, pullSize, offset, consumeQueue.queueId)
+				Log.Debugf("ClientId: %s 要拉取 %d 条数据, offset:%d,  开始监听queue %d", clientId, pullSize, offset, consumeQueue.queueId)
 				fetchDataChanDone := make(chan struct{})
 				go func() {
 					targetOffset := offset + int64(pullSize)
@@ -384,26 +374,26 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 						}
 						select {
 						case <-ctx.Done():
-							fmt.Println("协程拉取时间超时，准备退出")
+							Log.Infof("协程拉取时间超时，准备退出")
 							return
 						default:
 							if consumeQueueIndex, err := consumeQueue.read(offset); err != nil {
 								if errors.Is(err, ErrMessageNotYet) {
 									// 如果没有找到消息，等待一秒
-									log.Printf("暂时还没有消息，等待1秒")
+									Log.Debugf("暂时还没有消息，等待1秒")
 									time.Sleep(time.Second)
 									continue
 								} else {
-									log.Printf("PullMessageHandler error %+v", err)
+									Log.Errorf("PullMessageHandler error %+v", err)
 									return
 								}
 							} else {
-								log.Printf("已经获得commitLogOffset为%d, 准备读取commitLog的消息", consumeQueueIndex.commitLogOffset)
+								Log.Infof("已经获得commitLogOffset为%d, 准备读取commitLog的消息", consumeQueueIndex.commitLogOffset)
 								if message, err := b.CommitLog.ReadMessage(consumeQueueIndex.commitLogOffset); err != nil {
-									log.Printf("读取CommitLog文件异常 error: %+v", err)
+									Log.Errorf("读取CommitLog文件异常 error: %+v", err)
 									return
 								} else {
-									fmt.Println("PullMessageHandler 获取到了数据,msgId:", message.MsgId)
+									Log.Debugf("PullMessageHandler 获取到了数据,msgId: %s", message.MsgId)
 									consumeQueue.messageChan <- message
 									offset += 1
 								}
@@ -416,12 +406,12 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 				for {
 					select {
 					case message := <-consumeQueue.messageChan:
-						log.Printf("开始组转消息， msgId: %s, QueueId: %d, QueueOffset:%d", message.MsgId, message.QueueId, message.QueueOffset)
+						Log.Debugf("开始组转消息， msgId: %s, QueueId: %d, QueueOffset:%d", message.MsgId, message.QueueId, message.QueueOffset)
 						responseData.Messages = append(responseData.Messages, message)
 					case <-fetchDataChanDone:
 						goto ReturnPullMessageData
 					case <-ctx.Done():
-						fmt.Println("拉取时间到，准备返回")
+						Log.Infof("拉取时间到，准备返回")
 						goto ReturnPullMessageData
 					}
 				}
@@ -434,7 +424,7 @@ ReturnPullMessageData:
 
 	responseData.Size = int32(len(responseData.Messages))
 	if bytes, err := proto.Marshal(&responseData); err != nil {
-		log.Printf("PullMessageHandler error: %v", err)
+		Log.Infof("PullMessageHandler error: %v", err)
 	} else {
 		b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_PullMessage, bytes, nil)
 	}
@@ -448,7 +438,7 @@ func (b *Broker) GetTopic(topicName string) *Topic {
 		b.topics[topicName] = topic
 		_, err := b.topicsFile.Write([]byte(topicName))
 		if err != nil {
-			log.Fatal("写入topic文件异常 err: ", err)
+			Log.Fatal("写入topic文件异常 err: ", err)
 		}
 		b.topicsFile.Sync()
 		return b.topics[topicName]
@@ -476,13 +466,13 @@ func (b *Broker) GetTopicConsumerGroup(gname string, topic *Topic) *ConsumerGrou
 
 // 生产者只管往某个主题生产消息
 func (b *Broker) ProducerMessage(msg *protocol.Message) error {
-	log.Printf("%s开始写入数据", msg.MsgId)
+	Log.Infof("ProducerMessage - [msgId:%s] 开始写入数据", msg.MsgId)
 	// 根据消息的主题，选择队列
 	topicName := msg.Topic
 	topic := b.GetTopic(topicName)
 	// 随机选择队列
 	randQueueId := rand.Intn(len(topic.ConsumeQueues))
-	log.Printf("%s 选择队列 %d", msg.MsgId, randQueueId)
+	Log.Infof("ProducerMessage - [msgId:%s] 选择队列 %d", msg.MsgId, randQueueId)
 	consumeQueue := topic.ConsumeQueues[randQueueId]
 	msg.QueueId = int32(consumeQueue.queueId)
 	bodyBytes, err := proto.Marshal(msg)
@@ -490,98 +480,30 @@ func (b *Broker) ProducerMessage(msg *protocol.Message) error {
 		return err
 	}
 	if queueOffset, err := consumeQueue.write(b.CommitLog.currentOffset, int32(len(bodyBytes)), 1); err != nil {
-		log.Fatal("ProducerMessage error: ", err)
+		Log.Fatal("ProducerMessage error: ", err)
 	} else {
 		msg.QueueOffset = queueOffset
 		if commitLogOffset, err := b.CommitLog.WriteMessage(msg); err != nil {
-			log.Fatal("ProducerMessage error: ", err)
+			Log.Fatal("ProducerMessage error: ", err)
 		} else {
-			log.Printf("写入消息成功，commitLogOffset%d, queueOffset:%d", commitLogOffset, queueOffset)
+			Log.Infof("写入消息成功，commitLogOffset%d, queueOffset:%d", commitLogOffset, queueOffset)
 		}
 	}
 
 	return nil
 }
 
-/**
-通过offset读取文件，然后发给消费者
-*/
-func (b *Broker) readCommitLogByOffset(offset int64) {
-	// 打开文件
-	fileName := "largefile.txt"
-	file, err := os.Open(fileName)
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-	// 设置文件偏移量
-	whence := io.SeekStart
-	pos, err := file.Seek(offset, whence)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("当前文件偏移量：%d\n", pos)
-	// 读取文件数据
-	buf := make([]byte, 1024)
-	n, err := file.Read(buf)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("实际读取的字节数：%d\n", n)
-	fmt.Printf("读取的文件数据：%s\n", string(buf[:n]))
-
-}
-
-/**
-用二分查找法，找到对应的消息
-*/
-func (b *Broker) readConsumeQueueByOffset(consumeQueueFilePath string, messageOffset int64) {
-	// 打开消费进度文件
-	file, err := os.Open(consumeQueueFilePath)
-	if err != nil {
-		fmt.Printf("Failed to open consume queue file: %v\n", err)
-		return
-	}
-	defer file.Close()
-	// 二分查找消息偏移量
-	var left, right, mid int64
-	fileInfo, _ := file.Stat()
-	fileSize := fileInfo.Size()
-	left = 0
-	right = fileSize/20 - 1 // 计算消息条目数量
-	for left <= right {
-		mid = (left + right) / 2
-		messageOffsetPos := mid * 20
-		messageOffsetBytes := make([]byte, 8)
-		if _, err := file.ReadAt(messageOffsetBytes, messageOffsetPos+4); err != nil {
-			fmt.Printf("Failed to read message offset from consume queue file: %v\n", err)
-			return
-		}
-		curMessageOffset := int64(binary.BigEndian.Uint64(messageOffsetBytes))
-		if curMessageOffset < messageOffset {
-			left = mid + 1
-		} else if curMessageOffset > messageOffset {
-			right = mid - 1
-		} else {
-			// 找到消息
-			consumeStatusBytes := make([]byte, 1)
-			if _, err := file.ReadAt(consumeStatusBytes, messageOffsetPos+16); err != nil {
-				fmt.Printf("Failed to read consume status from consume queue file: %v\n", err)
-				return
-			}
-			consumeStatus := consumeStatusBytes[0]
-			fmt.Printf("Message offset %v consume status is %v\n", messageOffset, consumeStatus)
-			return
-		}
-	}
-	fmt.Printf("Message offset %v not found in consume queue file\n", messageOffset)
-}
-
 func (b *Broker) init() {
+
+	// 初始化log
+	// 设置日志级别为 Debug，并将日志输出到标准输出
+	Log.SetLevel(log.InfoLevel)
+	Log.SetOutput(os.Stdout)
+	//Log.SetReportCaller(true)
 
 	// 初始化commitLog引擎
 	if commitLog, err := NewCommitLog(); err != nil {
-		log.Fatal(err)
+		Log.Fatal(err)
 	} else {
 		b.CommitLog = commitLog
 	}
@@ -592,7 +514,7 @@ func (b *Broker) init() {
 	}
 	topics, err := b.topicRouteManager.Init()
 	if err != nil {
-		log.Fatal(err)
+		Log.Fatal(err)
 	} else {
 		b.topics = topics
 	}
@@ -603,7 +525,7 @@ func (b *Broker) init() {
 		}
 	}
 
-	fmt.Println("初始化完成......")
+	Log.Infof("初始化完成......")
 }
 
 func (b *Broker) Return(conn net.Conn, opaque protocol.OpaqueType, dataBytes []byte, err error) {
@@ -636,10 +558,10 @@ func (b *Broker) Return(conn net.Conn, opaque protocol.OpaqueType, dataBytes []b
 		remotingCommand.RequestId = value
 	}
 	if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
-		log.Printf("PullMessageHandler error: %v", err)
+		Log.Infof("PullMessageHandler error: %v", err)
 	} else {
 		if _, err := conn.Write(remotingCommandBytes); err != nil {
-			fmt.Printf("Failed to send response: %v\n", err)
+			Log.Infof("Failed to send response: %v\n", err)
 		}
 	}
 }
@@ -673,10 +595,10 @@ func (b *Broker) ReturnWithRequestId(requestId string, conn net.Conn, opaque pro
 		}
 		// 从上下文中获取全局变量
 		if remotingCommandBytes, err := proto.Marshal(&remotingCommand); err != nil {
-			log.Printf("PullMessageHandler error: %v", err)
+			Log.Infof("PullMessageHandler error: %v", err)
 		} else {
 			if _, err := conn.Write(remotingCommandBytes); err != nil {
-				fmt.Printf("Failed to send response: %v\n", err)
+				Log.Infof("Failed to send response: %v", err)
 			}
 		}
 	}()
@@ -708,9 +630,9 @@ func (b *Broker) reBalance(topicName string, consumerGroupName string) {
 // 重新分配队列
 // 能不能每一个消费组创建一个自动平台的goroutine呢
 func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
-	log.Printf("开启消费组的平衡协程 %s %s", topicName, consumerGroupName)
+	Log.Infof("开启消费组的平衡协程 %s %s", topicName, consumerGroupName)
 	for {
-		log.Printf("doReBalance - 检测[topic:%s][consumerGroupName:%s]", topicName, consumerGroupName)
+		Log.Debugf("doReBalance - 检测[topic:%s][consumerGroupName:%s]", topicName, consumerGroupName)
 		key := b.GetReBalanceKey(topicName, consumerGroupName)
 		if flag, ok := b.reBalanceMap[key]; !ok {
 			time.Sleep(3 * time.Second)
@@ -737,7 +659,7 @@ func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 			}
 		}
 
-		log.Printf("doReBalance - 开始重新分配队列")
+		Log.Infof("doReBalance - 开始重新分配队列")
 
 		// 获取正常可用的客户端
 		var clients []*Client
@@ -752,7 +674,7 @@ func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		log.Printf("ReBalance - topicRouteRecordsSize：%d, clientsSize:%d", topicRouteRecordsSize, clientsSize)
+		Log.Infof("ReBalance - topicRouteRecordsSize：%d, clientsSize:%d", topicRouteRecordsSize, clientsSize)
 		//重新分配
 		//分配策略: 获取现在所有的消费组中所有的clientId，做平均分配
 		var targetClients []*Client
@@ -784,9 +706,9 @@ func (b *Broker) GetReBalanceKey(topicName string, consumerGroupName string) str
 }
 
 func (b *Broker) RemoveClient(clientId string) error {
-	log.Println("开始删除Client:%s", clientId)
+	Log.Infof("开始删除Client:%s", clientId)
 	// 删除掉topic中的client
-	log.Println("删除掉topic中的client:%s", clientId)
+	Log.Infof("删除掉topic中的client:%s", clientId)
 
 	var reBalanceTarget []*ConsumerGroup //group->topic
 
@@ -799,7 +721,7 @@ func (b *Broker) RemoveClient(clientId string) error {
 			}
 		}
 	}
-	log.Println("删除topicTable中的client:%s", clientId)
+	Log.Infof("删除topicTable中的client:%s", clientId)
 	// 删除topicTable中的client
 	for _, r := range b.topicRouteManager.table {
 		if r.clientId == clientId {

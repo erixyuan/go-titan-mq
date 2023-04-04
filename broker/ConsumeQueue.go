@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"io/ioutil"
-	"log"
 	"os"
 	"strconv"
 	"sync"
@@ -54,7 +53,7 @@ func NewConsumeQueue(topic string, queueId int) (*ConsumeQueue, error) {
 			return nil, err
 		} else {
 			if _, err := cq.getWriteFile(); err != nil {
-				log.Fatal("NewConsumeQueue error:", err)
+				Log.Fatal("NewConsumeQueue error:", err)
 			}
 		}
 	}
@@ -70,7 +69,7 @@ func NewConsumeQueue(topic string, queueId int) (*ConsumeQueue, error) {
 				name := f.Name()
 				num, err := strconv.ParseInt(name, 10, 64)
 				if err != nil {
-					log.Fatal(err)
+					Log.Fatal(err)
 				} else {
 					if num >= max {
 						max = num
@@ -80,10 +79,10 @@ func NewConsumeQueue(topic string, queueId int) (*ConsumeQueue, error) {
 			}
 		}
 		if maxFileInfo == nil {
-			log.Fatal("NewConsumeQueue error:", err)
+			Log.Fatal("NewConsumeQueue error:", err)
 		}
 		if maxNum, err := strconv.ParseInt(maxFileInfo.Name(), 10, 64); err != nil {
-			log.Fatal("NewConsumeQueue error:", err)
+			Log.Fatal("NewConsumeQueue error:", err)
 		} else {
 			cq.maxQueueOffset = maxNum + maxFileInfo.Size()/CONSUME_QUEUE_UNIT_SIZE
 		}
@@ -99,9 +98,9 @@ func NewConsumeQueue(topic string, queueId int) (*ConsumeQueue, error) {
 func (cq *ConsumeQueue) write(commitLogOffset int64, size int32, tagHashCode int64) (int64, error) {
 	cq.writeFileLock.Lock()
 	defer cq.writeFileLock.Unlock()
-	log.Printf("开始写入ConsumeQueue；commitLogOffset:%d, size:%d, tagHashCode:%d", commitLogOffset, size, tagHashCode)
+	Log.Printf("开始写入ConsumeQueue；commitLogOffset:%d, size:%d, tagHashCode:%d", commitLogOffset, size, tagHashCode)
 	if size < 1 {
-		log.Fatal("写入ConsumeQueue数据异常")
+		Log.Fatal("写入ConsumeQueue数据异常")
 	}
 	var lastOffset = cq.maxQueueOffset
 
@@ -122,21 +121,21 @@ func (cq *ConsumeQueue) write(commitLogOffset int64, size int32, tagHashCode int
 		// 刷盘
 		err = file.Sync()
 		if err != nil {
-			log.Fatal(err)
+			Log.Fatal(err)
 		}
 		err = file.Close()
 		if err != nil {
-			log.Fatal(err)
+			Log.Fatal(err)
 		}
 	}()
 	if err != nil {
-		log.Println("write error: ", err)
+		Log.Errorf("write error: ", err)
 		return 0, err
 	} else {
 		if _, err := file.Write(buf.Bytes()); err != nil {
 			return 0, err
 		} else {
-			log.Println("写入成功ConsumeQueues数据成功:", commitLogOffset, size, tagHashCode)
+			Log.Println("写入成功ConsumeQueues数据成功:", commitLogOffset, size, tagHashCode)
 		}
 	}
 	cq.maxQueueOffset += 1
@@ -167,7 +166,7 @@ func (cq *ConsumeQueue) getWriteFile() (*os.File, error) {
 				name := f.Name()
 				num, err := strconv.ParseInt(name, 10, 64)
 				if err != nil {
-					log.Fatal(err)
+					Log.Fatal(err)
 				} else {
 					if num >= max {
 						max = num
@@ -187,16 +186,15 @@ func (cq *ConsumeQueue) getWriteFile() (*os.File, error) {
 	}
 	file, err := os.OpenFile(openPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		log.Println("getWriteFile error:", err)
+		Log.Errorf("getWriteFile error: %+v", err)
 		return nil, err
 	}
 	if stat, err := file.Stat(); err != nil {
-		log.Fatal(err)
+		Log.Fatal(err)
 	} else {
-		log.Println("getWriteFile:", openPath, stat.Size())
+		Log.Println("getWriteFile:", openPath, stat.Size())
 		if stat.Size() >= CONSUME_QUEUE_FILE_MAX_SIZE {
-			log.Println(fileCurrentSize)
-			log.Fatal("文件超出了限制")
+			Log.Fatalf("文件超出了限制 %d", fileCurrentSize)
 		}
 
 	}
@@ -210,10 +208,10 @@ func (cq *ConsumeQueue) getReadFile(consumeOffset int64) (*os.File, error) {
 	fileIndex := consumeOffset * CONSUME_QUEUE_UNIT_SIZE / CONSUME_QUEUE_FILE_MAX_SIZE // 计算商
 	fileName := fmt.Sprintf("%020d", fileIndex*CONSUME_QUEUE_FILE_MAX_SIZE)            // 根据文件名称规则，计算出文件名
 	filePath := fmt.Sprintf("%s/%d/%s", cq.baseDir, cq.queueId, fileName)
-	log.Println("getReadFile:", filePath)
+	Log.Debugf("getReadFile: %s", filePath)
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDONLY, 0644)
 	if err != nil {
-		log.Println("getReadFile, error ", err)
+		Log.Errorf("getReadFile, error %+v", err)
 		return nil, err
 	}
 	return file, nil
@@ -227,13 +225,13 @@ func (cq *ConsumeQueue) read(consumeOffset int64) (*consumeQueueUnit, error) {
 	unit := &consumeQueueUnit{}
 	file, err := cq.getReadFile(consumeOffset)
 	if err != nil {
-		log.Println("read error:", err)
+		Log.Errorf("read error: %+v", err)
 		return nil, err
 	}
 	defer file.Close()
 	// 计算要读取的偏移量 600 * 20 % 600000
 	readOffset := (consumeOffset * CONSUME_QUEUE_UNIT_SIZE) % CONSUME_QUEUE_FILE_MAX_SIZE
-	log.Println("read offset:", readOffset)
+	Log.Debugf("read offset: %d", readOffset)
 	if _, err := file.Seek(readOffset, 0); err != nil {
 		return nil, err
 	}
@@ -259,9 +257,9 @@ func (cq *ConsumeQueue) read(consumeOffset int64) (*consumeQueueUnit, error) {
 		return nil, err
 	}
 
-	log.Printf("读取consumeQueue的结果为%+v", unit)
+	Log.Debugf("读取consumeQueue的结果为%+v", unit)
 	if unit.size < 1 {
-		log.Fatal("读取consumeQueue的数据异常")
+		Log.Fatalf("读取consumeQueue的数据异常")
 	}
 	return unit, nil
 }

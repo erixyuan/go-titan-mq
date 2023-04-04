@@ -9,7 +9,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -67,7 +66,7 @@ func NewCommitLog() (*CommitLog, error) {
 					var num int64
 					num, err = strconv.ParseInt(name, 10, 64)
 					if err != nil {
-						log.Fatal(err)
+						Log.Fatal(err)
 					} else {
 						if num >= max {
 							max = num
@@ -78,7 +77,7 @@ func NewCommitLog() (*CommitLog, error) {
 			}
 			fileNums = len(files)
 			if targetFile == nil {
-				log.Fatal("找不到commitLog目标文件")
+				Log.Fatal("找不到commitLog目标文件")
 			} else {
 				filePath = fmt.Sprintf("%s/%s", commitLogDir, targetFile.Name())
 				file, err = os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
@@ -96,7 +95,7 @@ func NewCommitLog() (*CommitLog, error) {
 		writeLock:         sync.Mutex{},
 		currentOffset:     int64(fileNums-1)*CommitLogFileSize + stat.Size(),
 	}
-	log.Printf("初始化 CommitLog：%+v", commitLog)
+	Log.Debugf("初始化 CommitLog：%+v", commitLog)
 	return &commitLog, nil
 }
 
@@ -148,15 +147,15 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 	// 获取消息体长度
 	bufLen := int32(buf.Len())
 	if bufLen != totalSize {
-		log.Fatal("写入长度与计算长度不相同")
+		Log.Fatal("写入长度与计算长度不相同")
 	} else {
-		//log.Printf("准备写入文件长度为:%d", bufLen)
+		Log.Debugf("准备写入文件长度为:%d", bufLen)
 	}
 	// 如何判断消息体是否跨越文件边界
 	// 当前的偏移量 + 写入的buf尺寸 大于 文件的最大值
 	//if cl.currentFileOffset+totalSize > (cl.lastOffset+CommitLogFileSize) && cl.currentFileOffset > cl.lastOffset {
 	if cl.currentFileOffset+int64(totalSize) > CommitLogFileSize {
-		//log.Println("跨文件写入")
+		//Log.Println("跨文件写入")
 		var nextFile *os.File
 		// 创建下一个文件
 		// 构造下一个文件名
@@ -176,29 +175,29 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 		secondPartBytes := buf.Bytes()[firstPartLen:]
 		// 写入第一部分消息体
 		// 因为至少剩余4KB的空间，所以能写入头部的的部分，以及部分消息体内容
-		log.Printf("写入第一部分的长度为:%d, md5:%d", len(firstPartBytes), md5.Sum(firstPartBytes))
+		Log.Debugf("写入第一部分的长度为:%d, md5:%d", len(firstPartBytes), md5.Sum(firstPartBytes))
 		binary.Write(cl.currentFile, binary.BigEndian, firstPartBytes)
 		// 写入第二部分消息体
-		log.Printf("写入第二部分的长度为:%d, md5:%d", len(secondPartBytes), md5.Sum(secondPartBytes))
+		Log.Debugf("写入第二部分的长度为:%d, md5:%d", len(secondPartBytes), md5.Sum(secondPartBytes))
 		binary.Write(nextFile, binary.BigEndian, secondPartBytes)
 		// 第二部分消息体补全区块
 		padding := CommitLogBlockSize - (secondPartLen % CommitLogBlockSize)
 		if padding > 0 {
-			log.Printf("第二部分的尾部补全区块长度:%d", padding)
+			Log.Debugf("第二部分的尾部补全区块长度:%d", padding)
 			pad := make([]byte, padding)
 			if err = binary.Write(nextFile, binary.BigEndian, pad); err != nil {
 				return 0, err
 			}
 
 		}
-		log.Printf("body 内容的md5:%d", md5.Sum(bodyBytes))
+		Log.Debugf("body 内容的md5:%d", md5.Sum(bodyBytes))
 		// 直接刷盘
-		//log.Println("当前文件刷盘:", cl.currentFilePath)
+		//Log.Println("当前文件刷盘:", cl.currentFilePath)
 		err = cl.currentFile.Sync()
 		if err != nil {
 			return 0, err
 		}
-		//log.Println("下一个文件刷盘:", nextFilePath)
+		//Log.Println("下一个文件刷盘:", nextFilePath)
 		err = nextFile.Sync()
 		if err != nil {
 			return 0, err
@@ -216,7 +215,7 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 		cl.currentFile = nextFile
 
 	} else {
-		//log.Println("当前文件写入")
+		//Log.Println("当前文件写入")
 		// 写入消息体长度、校验码和消息体
 		err = binary.Write(cl.currentFile, binary.BigEndian, buf.Bytes())
 		if err != nil {
@@ -225,7 +224,7 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 		if totalSize > CommitLogBlockSize {
 			// 文件超过了4k大小
 			padding := CommitLogBlockSize - (totalSize % CommitLogBlockSize)
-			log.Printf("文件超过了阈值, padding: %d", padding)
+			Log.Debugf("文件超过了阈值, padding: %d", padding)
 			if padding > 0 {
 				pad := make([]byte, padding)
 				if err = binary.Write(cl.currentFile, binary.BigEndian, pad); err != nil {
@@ -238,8 +237,8 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 			cl.currentOffset += int64(totalSize) + int64(padding)
 			// 直接刷盘
 			err = cl.currentFile.Sync()
-			log.Printf("写入总长度为%d", int64(totalSize)+int64(padding))
-			log.Printf("body 内容的md5:%d", md5.Sum(bodyBytes))
+			Log.Debugf("写入总长度为%d", int64(totalSize)+int64(padding))
+			Log.Debugf("body 内容的md5:%d", md5.Sum(bodyBytes))
 			if err != nil {
 				return 0, err
 			}
@@ -265,10 +264,10 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 		}
 
 	}
-	log.Printf("结果：currentFileOffset：%d, currentOffset: %d, lastOffset: %d", cl.currentFileOffset, cl.currentOffset, lastOffset)
+	Log.Debugf("结果：currentFileOffset：%d, currentOffset: %d, lastOffset: %d", cl.currentFileOffset, cl.currentOffset, lastOffset)
 
 	if lastOffset%CommitLogBlockSize != 0 {
-		log.Fatal("写入异常，偏移量错误:", lastOffset)
+		Log.Fatalf("写入异常，偏移量错误: %+v", lastOffset)
 	}
 
 	// 返回nil表示写入成功
@@ -276,7 +275,7 @@ func (cl *CommitLog) WriteMessage(msg *protocol.Message) (int64, error) {
 }
 
 func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
-	//log.Printf("开始读取%d的消息", offset)
+	//Log.Debugf("开始读取%d的消息", offset)
 	// 检查offset是否合法
 	if offset < 0 || offset >= cl.currentOffset {
 		return nil, fmt.Errorf("invalid currentFileOffset %d", offset)
@@ -284,7 +283,7 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 	// 计算消息所在文件和文件内偏移量
 	fileIndex := offset / CommitLogFileSize
 	fileOffset := offset % CommitLogFileSize
-	log.Printf("计算得出当前文件的偏移量：%d", fileOffset)
+	Log.Debugf("计算得出当前文件的偏移量：%d", fileOffset)
 	// 打开消息所在文件
 	filePath := cl.fileNameAtIndex(fileIndex)
 	targetFile, err := os.Open(filePath)
@@ -293,7 +292,7 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 	}
 	defer targetFile.Close()
 	// 定位到消息所在位置
-	log.Printf("计算得到fileOffset：%d, 文件位置:%s", fileOffset, filePath)
+	Log.Debugf("计算得到fileOffset：%d, 文件位置:%s", fileOffset, filePath)
 	_, err = targetFile.Seek(fileOffset, io.SeekStart)
 	if err != nil {
 		return nil, err
@@ -321,15 +320,15 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 
 	err = binary.Read(targetFile, binary.BigEndian, &totalSize)
 	if err != nil {
-		log.Printf("读取totalSize异常")
+		Log.Debugf("读取totalSize异常")
 		return nil, err
 	} else {
-		//log.Printf("准备读取totalSize:%d", totalSize)
+		//Log.Debugf("准备读取totalSize:%d", totalSize)
 	}
 	totalBytes = make([]byte, totalSize)
 	// 判断是否跨文件，如果是跨文件先从两个文件拿到数据，拼接在一起
 	if fileOffset+int64(totalSize) >= CommitLogFileSize {
-		log.Println("跨文件读取")
+		Log.Println("跨文件读取")
 		var nextFile *os.File
 		var firstPartBytes []byte
 		var secondPartBytes []byte
@@ -341,7 +340,7 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 		if err != nil {
 			return nil, err
 		} else {
-			log.Printf("成功打开下一个文件:%s", nextFilePath)
+			Log.Debugf("成功打开下一个文件:%s", nextFilePath)
 		}
 		defer nextFile.Close()
 		// 根据长度计算出，需要取下一个文件的多少个区块
@@ -358,10 +357,10 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 		err = binary.Read(targetFile, binary.BigEndian, &firstPartBytes)
 
 		if err != nil {
-			log.Println("read firstPartBytes error:", err)
+			Log.Errorf("read firstPartBytes error:%+v", err)
 			return nil, err
 		}
-		log.Printf("读取完第一部分的长度为%d，md5:%d", len(firstPartBytes), md5.Sum(firstPartBytes))
+		Log.Debugf("读取完第一部分的长度为%d，md5:%d", len(firstPartBytes), md5.Sum(firstPartBytes))
 		// 计算第二部分消息体长度
 		secondPartLen := int64(totalSize) - firstPartLen
 		//paddingNums := secondPartLen/CommitLogBlockSize + 1
@@ -376,18 +375,18 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 		//_, err = nextFile.ReadAt(secondPartBytes, 0)
 		//_, err = io.ReadFull(nextFile, secondPartBytes)
 		if err != nil {
-			log.Println("read secondPartBytes error:", err)
+			Log.Errorf("read secondPartBytes error: %+v", err)
 			return nil, err
 		}
-		log.Printf("读取完第二部分的长度为%d, md5:%d", len(secondPartBytes), md5.Sum(secondPartBytes))
+		Log.Debugf("读取完第二部分的长度为%d, md5:%d", len(secondPartBytes), md5.Sum(secondPartBytes))
 		// 两部分拼接再一起
 		totalBytes = make([]byte, 0)
 		totalBytes = append(totalBytes, firstPartBytes...)
 		totalBytes = append(totalBytes, secondPartBytes...)
-		log.Printf("最后获得文件长度:%d", len(totalBytes))
+		Log.Debugf("最后获得文件长度:%d", len(totalBytes))
 		//totalBytes = totalBytes[:totalSize]
 	} else {
-		log.Printf("当前文件读取: %s", cl.currentFilePath)
+		Log.Debugf("当前文件读取: %s", cl.currentFilePath)
 		// 再偏移到当前文件
 		_, err = targetFile.Seek(fileOffset, io.SeekStart)
 		if err != nil {
@@ -396,7 +395,7 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 		_, err = targetFile.Read(totalBytes)
 		if err != nil {
 			if err == io.EOF {
-				log.Println("read totalBytes error:", err)
+				Log.Errorf("read totalBytes error: %+v", err)
 				return nil, err
 			}
 		}
@@ -432,7 +431,7 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 	if err = binary.Read(buf, binary.BigEndian, &bodyBytes); err != nil {
 		return nil, err
 	} else {
-		//log.Printf("body 内容的md5:%d", md5.Sum(bodyBytes))
+		//Log.Debugf("body 内容的md5:%d", md5.Sum(bodyBytes))
 	}
 	if err = binary.Read(buf, binary.BigEndian, &topicLen); err != nil {
 		return nil, err
@@ -445,9 +444,9 @@ func (cl *CommitLog) ReadMessage(offset int64) (*protocol.Message, error) {
 	var msg protocol.Message
 	err = proto.Unmarshal(bodyBytes, &msg)
 	if err != nil {
-		log.Printf("body长度为%d", bodyLen)
-		log.Printf("topic长度为%d", topicLen)
-		log.Printf("反序列化body异常 error: %v", err)
+		Log.Errorf("body长度为%d", bodyLen)
+		Log.Errorf("topic长度为%d", topicLen)
+		Log.Errorf("反序列化body异常 error: %v", err)
 		return nil, err
 	}
 	return &msg, nil
