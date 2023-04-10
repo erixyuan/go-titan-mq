@@ -263,3 +263,82 @@ func (cq *ConsumeQueue) read(consumeOffset int64) (*consumeQueueUnit, error) {
 	}
 	return unit, nil
 }
+
+// 读取consumeQueue数据
+func (cq *ConsumeQueue) readBatch(consumeOffset int64, nums int) ([]*consumeQueueUnit, error) {
+	Log.Printf("readBatch begin")
+	if consumeOffset+int64(nums) > cq.maxQueueOffset {
+		return nil, ErrMessageNotYet
+	}
+
+	file, err := cq.getReadFile(consumeOffset)
+	if err != nil {
+		Log.Errorf("read error: %+v", err)
+		return nil, err
+	}
+	defer file.Close()
+	var ret = make([]*consumeQueueUnit, 0)
+
+	end := consumeOffset + int64(nums)
+	for {
+		var unit consumeQueueUnit
+		if consumeOffset >= end {
+			break
+		}
+		// 计算要读取的偏移量 600 * 20 % 600000
+		readOffset := (consumeOffset * CONSUME_QUEUE_UNIT_SIZE) % CONSUME_QUEUE_FILE_MAX_SIZE
+		Log.Debugf("read offset: %d", readOffset)
+		if _, err := file.Seek(readOffset, 0); err != nil {
+			return nil, err
+		}
+		// 读取consumeQueue数据
+		data := make([]byte, CONSUME_QUEUE_UNIT_SIZE)
+		if _, err := file.Read(data); err != nil {
+			if err == io.EOF {
+				// 这里已经读到结尾了，就是还没有消息
+				return nil, ErrMessageNotYet
+			} else {
+				// 读取出现错误，处理错误信息
+				return nil, err
+			}
+		}
+		buf := bytes.NewBuffer(data)
+		if err := binary.Read(buf, binary.BigEndian, &unit.commitLogOffset); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(buf, binary.BigEndian, &unit.size); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(buf, binary.BigEndian, &unit.tagHashCode); err != nil {
+			return nil, err
+		}
+
+		Log.Debugf("读取consumeQueue的结果为%+v", unit)
+		if unit.size < 1 {
+			Log.Fatalf("读取consumeQueue的数据异常")
+		}
+		ret = append(ret, &unit)
+		consumeOffset += 1
+	}
+
+	return ret, nil
+}
+
+// 计算出总共有多少消息
+func (cq *ConsumeQueue) Count() (int64, error) {
+	// 读取所有的文件
+	var totalFileSize int64
+	if files, err := ioutil.ReadDir(cq.pathDir); err != nil {
+		return 0, err
+	} else {
+		for _, f := range files {
+			if !f.IsDir() {
+				// 合计大小
+				totalFileSize += f.Size()
+			}
+		}
+	}
+
+	// 除以单个文件的大小
+	return totalFileSize / CONSUME_QUEUE_UNIT_SIZE, nil
+}

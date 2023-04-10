@@ -28,6 +28,7 @@ publish 命令表示客户端发布一条消息，这里会遍历该主题对应
 */
 
 var Log = log.New()
+var LogLevel = log.InfoLevel
 
 type Broker struct {
 	clients            map[net.Conn]*Client // 方便从conn找到clientId
@@ -83,10 +84,14 @@ func (b *Broker) Start(port int) error {
 	router.POST("/topic/db", handler.FetchTopicDb)
 	router.GET("/topic/data", handler.FetchTopicData)
 	router.GET("/topic/table", handler.FetchTopicTable)
+	router.POST("/topic/list", handler.FetchTopicList)
 	router.GET("/produce/message", handler.ProduceMessage)
+	router.POST("/message/list", handler.FetchMessageList)
+
+	corsHandler := handler.setCorsHeader(router)
 
 	// 启动两个监听器
-	err = http.ListenAndServe(":9091", router)
+	err = http.ListenAndServe(":9091", corsHandler)
 	if err != nil {
 		Log.Fatal(err)
 	}
@@ -497,7 +502,7 @@ func (b *Broker) init() {
 
 	// 初始化log
 	// 设置日志级别为 Debug，并将日志输出到标准输出
-	Log.SetLevel(log.InfoLevel)
+	Log.SetLevel(LogLevel)
 	Log.SetOutput(os.Stdout)
 	//Log.SetReportCaller(true)
 

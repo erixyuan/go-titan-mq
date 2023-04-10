@@ -1,4 +1,5 @@
 import axios from 'axios';
+import qs from "query-string";
 
 export interface MessageRecord {
   id: number;
@@ -13,8 +14,26 @@ export interface MessageRecord {
 }
 export type MessageListType = MessageRecord[];
 
-export function queryMessageList() {
-  return axios.post<MessageListType>('/api/message/list');
+export interface MessageListRes {
+  list: MessageRecord[];
+  total: number;
+}
+
+export interface MessageParams extends Partial<MessageRecord> {
+  topic:string,
+  queueId:number,
+  current: number;
+  pageSize: number;
+}
+
+
+export function queryMessageList(params: MessageParams) {
+  const customConfig = {
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  };
+  return axios.post<MessageListRes>('/message/list', JSON.stringify(params), customConfig);
 }
 
 interface MessageStatus {
@@ -22,7 +41,7 @@ interface MessageStatus {
 }
 
 export function setMessageStatus(data: MessageStatus) {
-  return axios.post<MessageListType>('/api/message/read', data);
+  return axios.post<MessageListType>('/message/read', data);
 }
 
 export interface ChatRecord {

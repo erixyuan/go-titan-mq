@@ -1,0 +1,47 @@
+syntax = "proto3";
+option go_package = "../protocol";
+package proto;
+
+message Response {
+  int32 code=1;
+  string msg=2;
+}
+
+message ConsumeUnit {
+  int64 commitLogOffset =1;
+  int32 size            =2;
+  int64 tagHashCode     =3;
+  string messageId = 4;
+  int64 offset=5;
+}
+
+message FetchMessageListReq {
+  int32 current = 1;
+  int32 pageSize = 2;
+  string topic = 3;
+  int32 queueId =4;
+}
+
+
+message FetchMessageListResp{
+  int32 code=1;
+  string msg=2;
+  Data data=3;
+  message Data {
+    repeated ConsumeUnit list =1;
+    int64 total = 2;
+  }
+}
+
+message TopicRecord {
+  string name=1;
+}
+message FetchTopicListResp{
+  int32 code=1;
+  string msg=2;
+  Data data=3;
+  message Data {
+    repeated TopicRecord list =1;
+  }
+}
+

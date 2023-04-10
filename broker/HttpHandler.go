@@ -17,6 +17,24 @@ type HttpHandler struct {
 	broker *Broker
 }
 
+func (h *HttpHandler) setCorsHeader(ht http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 设置允许跨域访问的域名
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+
+		// 如果是 OPTIONS 请求，则返回 200 状态码
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// 处理请求
+		ht.ServeHTTP(w, r)
+	})
+}
+
 func (h *HttpHandler) Index(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 
 }
@@ -69,20 +87,6 @@ func (h *HttpHandler) AddConsumerGroup(writer http.ResponseWriter, request *http
 	}
 	h.Return(writer, nil)
 }
-func (h *HttpHandler) Return(writer http.ResponseWriter, data any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusBadRequest)
-	var successRet = struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data any    `json:"data"`
-	}{
-		Code: 200,
-		Msg:  "success",
-		Data: data,
-	}
-	json.NewEncoder(writer).Encode(successRet)
-}
 
 func (h *HttpHandler) FetchTopicDb(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 	bytes, err := json.Marshal(h.broker.topicRouteManager.topicDb)
@@ -132,4 +136,132 @@ func (h *HttpHandler) ProduceMessage(writer http.ResponseWriter, request *http.R
 			time.Sleep(1 * time.Second)
 		}
 	}()
+}
+
+func (h *HttpHandler) FetchMessageList(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+	decoder := json.NewDecoder(request.Body)
+	defer request.Body.Close()
+	var req protocol.FetchMessageListReq
+	var dataList []*protocol.ConsumeUnit
+	err := decoder.Decode(&req)
+	if err != nil {
+		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	consumeQueue, err := NewConsumeQueue(req.Topic, int(req.QueueId))
+	if err != nil {
+		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Current < 1 {
+		req.Current = 1
+	}
+	if req.PageSize == 0 {
+		req.PageSize = 10
+	}
+	offset := int64((req.Current - 1) * req.PageSize)
+	total, err := consumeQueue.Count()
+	if err != nil {
+		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := consumeQueue.readBatch(offset, int(req.PageSize))
+	if err != nil {
+		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	for i, item := range list {
+		message, err := h.broker.CommitLog.ReadMessage(item.commitLogOffset)
+		if err != nil {
+			h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		var tmp = protocol.ConsumeUnit{
+			CommitLogOffset: item.commitLogOffset,
+			Size:            item.size,
+			TagHashCode:     item.tagHashCode,
+			MessageId:       message.MsgId,
+			Offset:          offset + int64(i),
+		}
+		dataList = append(dataList, &tmp)
+	}
+
+	var resp = protocol.FetchMessageListResp{
+		Code: 20000,
+		Msg:  "success",
+		Data: &protocol.FetchMessageListResp_Data{
+			Total: total,
+			List:  dataList,
+		},
+	}
+	h.ReturnJson(writer, resp)
+}
+
+func (h *HttpHandler) FetchTopicList(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+	var dataList []*protocol.TopicRecord
+	for t, _ := range h.broker.topicRouteManager.topicDb {
+		dataList = append(dataList, &protocol.TopicRecord{Name: t})
+	}
+	var resp = protocol.FetchTopicListResp{
+		Code: 20000,
+		Msg:  "success",
+		Data: &protocol.FetchTopicListResp_Data{
+			List: dataList,
+		},
+	}
+	h.ReturnJson(writer, resp)
+}
+
+func (h *HttpHandler) ReturnJson(writer http.ResponseWriter, data any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writer.Write(jsonBytes)
+
+}
+func (h *HttpHandler) ReturnErrJson(writer http.ResponseWriter, code int, msg string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusBadRequest)
+	var ret = struct {
+		code int
+		msg  string
+	}{
+		code: code,
+		msg:  msg,
+	}
+	jsonBytes, err := json.Marshal(ret)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writer.Write(jsonBytes)
+
+}
+func (h *HttpHandler) Return(writer http.ResponseWriter, data any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusBadRequest)
+	var successRet = struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data any    `json:"data"`
+	}{
+		Code: 200,
+		Msg:  "success",
+		Data: data,
+	}
+
+	jsonBytes, err := json.Marshal(successRet)
+	Log.Printf("返回：%v", string(jsonBytes))
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprint(writer, string(jsonBytes))
+
+	//json.NewEncoder(writer).Encode(successRet)
 }
