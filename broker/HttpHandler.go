@@ -240,6 +240,7 @@ func (h *HttpHandler) ReturnJson(writer http.ResponseWriter, data any) {
 
 }
 func (h *HttpHandler) ReturnErrJson(writer http.ResponseWriter, code int, msg string) {
+	Log.Warnf("ReturnErrJson error: %s", msg)
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusBadRequest)
 	var ret = struct {
@@ -254,7 +255,9 @@ func (h *HttpHandler) ReturnErrJson(writer http.ResponseWriter, code int, msg st
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writer.Write(jsonBytes)
+	if _, err := writer.Write(jsonBytes); err != nil {
+		Log.Errorf("ReturnErrJson error: %v", err)
+	}
 
 }
 func (h *HttpHandler) Return(writer http.ResponseWriter, data any) {

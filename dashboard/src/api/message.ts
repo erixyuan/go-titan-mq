@@ -1,16 +1,12 @@
 import axios from 'axios';
-import qs from "query-string";
+import qs from 'query-string';
 
 export interface MessageRecord {
-  id: number;
-  type: string;
-  title: string;
-  subTitle: string;
-  avatar?: string;
-  content: string;
-  time: string;
-  status: 0 | 1;
-  messageType?: number;
+  offset: number;
+  commitLogOffset: number;
+  messageId: string;
+  size: number;
+  tagHashCode: number;
 }
 export type MessageListType = MessageRecord[];
 
@@ -20,20 +16,14 @@ export interface MessageListRes {
 }
 
 export interface MessageParams extends Partial<MessageRecord> {
-  topic:string,
-  queueId:number,
+  topic: string;
+  queueId: number;
   current: number;
   pageSize: number;
 }
 
-
 export function queryMessageList(params: MessageParams) {
-  const customConfig = {
-    headers: {
-      'Content-Type': 'application/json'
-    }
-  };
-  return axios.post<MessageListRes>('/message/list', JSON.stringify(params), customConfig);
+  return axios.post<MessageListRes>('/message/list', params);
 }
 
 interface MessageStatus {

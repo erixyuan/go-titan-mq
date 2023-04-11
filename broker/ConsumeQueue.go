@@ -267,10 +267,17 @@ func (cq *ConsumeQueue) read(consumeOffset int64) (*consumeQueueUnit, error) {
 // 读取consumeQueue数据
 func (cq *ConsumeQueue) readBatch(consumeOffset int64, nums int) ([]*consumeQueueUnit, error) {
 	Log.Printf("readBatch begin")
-	if consumeOffset+int64(nums) > cq.maxQueueOffset {
+
+	if consumeOffset > cq.maxQueueOffset {
 		return nil, ErrMessageNotYet
 	}
 
+	var end int64
+	if consumeOffset+int64(nums) > cq.maxQueueOffset {
+		end = cq.maxQueueOffset
+	} else {
+		end = consumeOffset + int64(nums)
+	}
 	file, err := cq.getReadFile(consumeOffset)
 	if err != nil {
 		Log.Errorf("read error: %+v", err)
@@ -278,8 +285,6 @@ func (cq *ConsumeQueue) readBatch(consumeOffset int64, nums int) ([]*consumeQueu
 	}
 	defer file.Close()
 	var ret = make([]*consumeQueueUnit, 0)
-
-	end := consumeOffset + int64(nums)
 	for {
 		var unit consumeQueueUnit
 		if consumeOffset >= end {

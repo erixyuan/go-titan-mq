@@ -6,13 +6,13 @@
         <a-col :flex="1">
           <a-form
             :model="formModel"
-            :label-col-props="{ span: 6 }"
+            :label-col-props="{ span: 4 }"
             :wrapper-col-props="{ span: 18 }"
             label-align="left"
           >
             <a-row :gutter="16">
               <a-col :span="8">
-                <a-form-item field="topic" label="主题">
+                <a-form-item field="topic" label="消息主题">
                   <a-select
                     v-model="formModel.topic"
                     :options="filterTopicOptions"
@@ -72,59 +72,10 @@
             </template>
             下载
           </a-button>
-          <a-tooltip :content="$t('mqTable.actions.refresh')">
+          <a-tooltip content="刷新">
             <div class="action-icon" @click="search"
               ><icon-refresh size="18"
             /></div>
-          </a-tooltip>
-          <a-dropdown @select="handleSelectDensity">
-            <a-tooltip :content="$t('mqTable.actions.density')">
-              <div class="action-icon"><icon-line-height size="18" /></div>
-            </a-tooltip>
-            <template #content>
-              <a-doption
-                v-for="item in densityList"
-                :key="item.value"
-                :value="item.value"
-                :class="{ active: item.value === size }"
-              >
-                <span>{{ item.name }}</span>
-              </a-doption>
-            </template>
-          </a-dropdown>
-          <a-tooltip :content="$t('mqTable.actions.columnSetting')">
-            <a-popover
-              trigger="click"
-              position="bl"
-              @popup-visible-change="popupVisibleChange"
-            >
-              <div class="action-icon"><icon-settings size="18" /></div>
-              <template #content>
-                <div id="tableSetting">
-                  <div
-                    v-for="(item, index) in showColumns"
-                    :key="item.dataIndex"
-                    class="setting"
-                  >
-                    <div style="margin-right: 4px; cursor: move">
-                      <icon-drag-arrow />
-                    </div>
-                    <div>
-                      <a-checkbox
-                        v-model="item.checked"
-                        @change="
-                          handleChange($event, item as TableColumnData, index)
-                        "
-                      >
-                      </a-checkbox>
-                    </div>
-                    <div class="title">
-                      {{ item.title === '#' ? '序列号' : item.title }}
-                    </div>
-                  </div>
-                </div>
-              </template>
-            </a-popover>
           </a-tooltip>
         </a-col>
       </a-row>
@@ -164,8 +115,6 @@
 
   const generateFormModel = () => {
     return {
-      number: '',
-      name: '',
       queueId: 0,
       topic: '',
     };
@@ -182,9 +131,11 @@
   const basePagination: Pagination = {
     current: 1,
     pageSize: 20,
+    total: 20,
   };
   const pagination = reactive({
     ...basePagination,
+    showTotal: true,
   });
   const densityList = computed(() => [
     {
@@ -207,8 +158,12 @@
   const columns = computed<TableColumnData[]>(() => [
     {
       title: '逻辑偏移',
-      dataIndex: 'offset',
-      slotName: 'offset',
+      render: ({ record }) => {
+        if (record === undefined) {
+          return 0;
+        }
+        return record.offset;
+      },
     },
     {
       title: '消息ID',
@@ -230,20 +185,24 @@
   ]);
 
   // 主题选择下拉
-  let topicList = ref<TopicRecord[] | null>();
-  const filterTopicOptions = ref<SelectOptionData[]>();
-  const queueIdOptions = ref<SelectOptionData[]>();
+  let topicList = ref<TopicRecord[]>([]);
+  const filterTopicOptions = ref<SelectOptionData[]>([]);
+  const queueIdOptions = ref<SelectOptionData[]>([]);
   const fetchTopicData = async () => {
     setLoading(true);
-    const { data } = await queryTopicList();
-    topicList = ref(data.list);
-    filterTopicOptions.value = data.list.map((item: any) => ({
-      label: item.name,
-      value: item.name,
-    }));
-    // 初始化下拉选项中的第一个
-    const [first] = data.list;
-    selectTopic(first);
+    try {
+      const { data } = await queryTopicList();
+      topicList = ref(data.list);
+      filterTopicOptions.value = data.list.map((item: any) => ({
+        label: item.name,
+        value: item.name,
+      }));
+      // 初始化下拉选项中的第一个
+      const [first] = data.list;
+      selectTopic(first);
+    } finally {
+      setLoading(false);
+    }
   };
   function selectTopic(t: TopicRecord) {
     formModel.value.topic = t.name;
@@ -287,72 +246,20 @@
     }
   };
 
+  // 搜索入口
   const search = () => {
     fetchData({
       ...basePagination,
       ...formModel.value,
     } as unknown as MessageParams);
   };
+  // 分页点击入口
   const onPageChange = (current: number) => {
-    // fetchData({ ...basePagination, current });
+    fetchData({ ...basePagination, current, ...formModel.value });
   };
 
   const reset = () => {
     formModel.value = generateFormModel();
-  };
-
-  const handleSelectDensity = (
-    val: string | number | Record<string, any> | undefined,
-    e: Event
-  ) => {
-    size.value = val as SizeProps;
-  };
-
-  const handleChange = (
-    checked: boolean | (string | boolean | number)[],
-    column: Column,
-    index: number
-  ) => {
-    if (!checked) {
-      cloneColumns.value = showColumns.value.filter(
-        (item) => item.dataIndex !== column.dataIndex
-      );
-    } else {
-      cloneColumns.value.splice(index, 0, column);
-    }
-  };
-
-  const exchangeArray = <T extends Array<any>>(
-    array: T,
-    beforeIdx: number,
-    newIdx: number,
-    isDeep = false
-  ): T => {
-    const newArray = isDeep ? cloneDeep(array) : array;
-    if (beforeIdx > -1 && newIdx > -1) {
-      // 先替换后面的，然后拿到替换的结果替换前面的
-      newArray.splice(
-        beforeIdx,
-        1,
-        newArray.splice(newIdx, 1, newArray[beforeIdx]).pop()
-      );
-    }
-    return newArray;
-  };
-
-  const popupVisibleChange = (val: boolean) => {
-    if (val) {
-      nextTick(() => {
-        const el = document.getElementById('tableSetting') as HTMLElement;
-        const sortable = new Sortable(el, {
-          onEnd(e: any) {
-            const { oldIndex, newIndex } = e;
-            exchangeArray(cloneColumns.value, oldIndex, newIndex);
-            exchangeArray(showColumns.value, oldIndex, newIndex);
-          },
-        });
-      });
-    }
   };
 
   watch(
