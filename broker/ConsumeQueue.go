@@ -47,7 +47,7 @@ func NewConsumeQueue(topic string, queueId int) (*ConsumeQueue, error) {
 		messageChan:      make(chan *protocol.Message),
 	}
 	// 检查目录是否存在，不存在则创建
-	cq.pathDir = fmt.Sprintf("%s/%d", cq.baseDir, queueId)
+	cq.pathDir = fmt.Sprintf("%s/%s/%d", cq.baseDir, topic, queueId)
 	if _, err := os.Stat(cq.pathDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(cq.pathDir, 0755); err != nil {
 			return nil, err
@@ -207,7 +207,7 @@ func (cq *ConsumeQueue) getReadFile(consumeOffset int64) (*os.File, error) {
 	// 获取当前consumeOffset应该所在的文件
 	fileIndex := consumeOffset * CONSUME_QUEUE_UNIT_SIZE / CONSUME_QUEUE_FILE_MAX_SIZE // 计算商
 	fileName := fmt.Sprintf("%020d", fileIndex*CONSUME_QUEUE_FILE_MAX_SIZE)            // 根据文件名称规则，计算出文件名
-	filePath := fmt.Sprintf("%s/%d/%s", cq.baseDir, cq.queueId, fileName)
+	filePath := fmt.Sprintf("%s/%s/%d/%s", cq.baseDir, cq.topic, cq.queueId, fileName)
 	Log.Debugf("getReadFile: %s", filePath)
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDONLY, 0644)
 	if err != nil {

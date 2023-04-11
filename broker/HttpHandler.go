@@ -211,10 +211,8 @@ func (h *HttpHandler) FetchTopicList(writer http.ResponseWriter, request *http.R
 	var dataList []*protocol.TopicRecord
 	for t, r := range h.broker.topicRouteManager.topicDb {
 		record := protocol.TopicRecord{Name: t}
-		for _, c := range r.ConsumerGroups {
-			for i, _ := range c.QueueInfo {
-				record.QueueIds = append(record.QueueIds, int32(i))
-			}
+		for _, i := range r.Queue {
+			record.QueueIds = append(record.QueueIds, int32(i))
 		}
 		dataList = append(dataList, &record)
 	}

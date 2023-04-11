@@ -6,8 +6,8 @@
         <a-col :flex="1">
           <a-form
             :model="formModel"
-            :label-col-props="{ span: 4 }"
-            :wrapper-col-props="{ span: 18 }"
+            :label-col-props="{ span: 6 }"
+            :wrapper-col-props="{ span: 10 }"
             label-align="left"
           >
             <a-row :gutter="16">
@@ -208,7 +208,7 @@
     formModel.value.topic = t.name;
     if (t.queueIds != null && t.queueIds.length > 0) {
       queueIdOptions.value = t.queueIds.map((item: number) => ({
-        label: `${item}队列`,
+        label: `${t.name} - ${item}队列`,
         value: item,
       }));
     } else {

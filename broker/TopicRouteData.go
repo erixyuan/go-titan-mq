@@ -31,15 +31,16 @@ type consumerGroupInfo struct {
 	QueueInfo         map[int]int64 `json:"queue_info"` // queueId -> offset
 }
 
-type topicInfo struct {
-	TopicName      string                        `json:"topic_name"`
-	ConsumerGroups map[string]*consumerGroupInfo `json:"consumer_group"`
+type topicDbRecord struct {
+	TopicName      string                        `json:"topic_name"`     // 队列的名称
+	ConsumerGroups map[string]*consumerGroupInfo `json:"consumer_group"` // 消费组
+	Queue          []int                         `json:"queue"`          //队列
 }
 
 type TopicRouteManager struct {
 	table      []*TopicRouteRecord
 	topicsFile *os.File
-	topicDb    map[string]*topicInfo
+	topicDb    map[string]*topicDbRecord
 	topics     map[string]*Topic
 	flushLock  sync.Mutex
 }
@@ -106,7 +107,7 @@ func (t *TopicRouteManager) GetTopicRouteInfo() {
 }
 
 func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
-	t.topicDb = make(map[string]*topicInfo)
+	t.topicDb = make(map[string]*topicDbRecord)
 	t.topics = make(map[string]*Topic) // 返回给给broker
 	if topicFile, err := os.OpenFile(TopicDbFilePath, os.O_RDWR|os.O_CREATE, 0644); err != nil {
 		log.Fatal(err)
@@ -135,7 +136,8 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 			log.Printf("读取topic.db成功 %+v", t.topicDb)
 			flushFlag := false
 			for topicName, d := range t.topicDb {
-				t.topics[topicName] = NewTopic(topicName)
+				t.topics[topicName] = RecoverTopic(topicName, len(d.Queue))
+				// 初始化消费组
 				for consumerGroupName, cg := range d.ConsumerGroups {
 					t.topics[topicName].consumerGroups[consumerGroupName] = &ConsumerGroup{
 						TopicName: topicName,
@@ -178,22 +180,27 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 }
 
 func (t *TopicRouteManager) RegisterTopic(topicName string) error {
-	info := topicInfo{
+	info := topicDbRecord{
 		TopicName:      topicName,
 		ConsumerGroups: make(map[string]*consumerGroupInfo, 0),
 	}
-	var topicMap = make(map[string]topicInfo)
+	var topicMap = make(map[string]topicDbRecord)
 	topicMap[topicName] = info
 	if _, ok := t.topicDb[topicName]; ok {
 		log.Println("新增失败，主题已经存在")
 		return nil
 	} else {
+		newTopic := NewTopic(topicName)
+		t.topics[topicName] = newTopic
 		// 更新db
-		t.topicDb[topicName] = &topicInfo{
+		dbRecord := topicDbRecord{
 			TopicName:      topicName,
 			ConsumerGroups: make(map[string]*consumerGroupInfo, 0),
 		}
-		t.topics[topicName] = NewTopic(topicName)
+		for i := 0; i < len(newTopic.ConsumeQueues); i++ {
+			dbRecord.Queue = append(dbRecord.Queue, i)
+		}
+		t.topicDb[topicName] = &dbRecord
 
 	}
 
