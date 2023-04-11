@@ -141,52 +141,61 @@ func (h *HttpHandler) ProduceMessage(writer http.ResponseWriter, request *http.R
 func (h *HttpHandler) FetchMessageList(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 	decoder := json.NewDecoder(request.Body)
 	defer request.Body.Close()
-	var req protocol.FetchMessageListReq
-	var dataList []*protocol.ConsumeUnit
-	err := decoder.Decode(&req)
+	var (
+		req      protocol.FetchMessageListReq
+		dataList []*protocol.ConsumeUnit
+		total    int64
+		err      error
+	)
+	err = decoder.Decode(&req)
 	if err != nil {
 		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	consumeQueue, err := NewConsumeQueue(req.Topic, int(req.QueueId))
-	if err != nil {
-		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	if req.Current < 1 {
-		req.Current = 1
-	}
-	if req.PageSize == 0 {
-		req.PageSize = 10
-	}
-	offset := int64((req.Current - 1) * req.PageSize)
-	total, err := consumeQueue.Count()
-	if err != nil {
-		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	list, err := consumeQueue.readBatch(offset, int(req.PageSize))
-	if err != nil {
-		h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	for i, item := range list {
-		message, err := h.broker.CommitLog.ReadMessage(item.commitLogOffset)
+	// 检查topic是否存在
+	if _, ok := h.broker.topics[req.Topic]; !ok {
+		// pass
+	} else {
+
+		consumeQueue, err := NewConsumeQueue(req.Topic, int(req.QueueId))
 		if err != nil {
 			h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
 			return
 		}
-		var tmp = protocol.ConsumeUnit{
-			CommitLogOffset: item.commitLogOffset,
-			Size:            item.size,
-			TagHashCode:     item.tagHashCode,
-			MessageId:       message.MsgId,
-			Offset:          offset + int64(i),
+		if req.Current < 1 {
+			req.Current = 1
 		}
-		dataList = append(dataList, &tmp)
+		if req.PageSize == 0 {
+			req.PageSize = 10
+		}
+		offset := int64((req.Current - 1) * req.PageSize)
+		total, err = consumeQueue.Count()
+		if err != nil {
+			h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		list, err := consumeQueue.readBatch(offset, int(req.PageSize))
+		if err != nil {
+			h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		for i, item := range list {
+			message, err := h.broker.CommitLog.ReadMessage(item.commitLogOffset)
+			if err != nil {
+				h.ReturnErrJson(writer, http.StatusBadRequest, err.Error())
+				return
+			}
+			var tmp = protocol.ConsumeUnit{
+				CommitLogOffset: item.commitLogOffset,
+				Size:            item.size,
+				TagHashCode:     item.tagHashCode,
+				MessageId:       message.MsgId,
+				Offset:          offset + int64(i),
+			}
+			dataList = append(dataList, &tmp)
+		}
 	}
-
 	var resp = protocol.FetchMessageListResp{
 		Code: 20000,
 		Msg:  "success",
@@ -200,8 +209,14 @@ func (h *HttpHandler) FetchMessageList(writer http.ResponseWriter, request *http
 
 func (h *HttpHandler) FetchTopicList(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 	var dataList []*protocol.TopicRecord
-	for t, _ := range h.broker.topicRouteManager.topicDb {
-		dataList = append(dataList, &protocol.TopicRecord{Name: t})
+	for t, r := range h.broker.topicRouteManager.topicDb {
+		record := protocol.TopicRecord{Name: t}
+		for _, c := range r.ConsumerGroups {
+			for i, _ := range c.QueueInfo {
+				record.QueueIds = append(record.QueueIds, int32(i))
+			}
+		}
+		dataList = append(dataList, &record)
 	}
 	var resp = protocol.FetchTopicListResp{
 		Code: 20000,

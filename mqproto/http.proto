@@ -35,6 +35,7 @@ message FetchMessageListResp{
 
 message TopicRecord {
   string name=1;
+  repeated int32 queueIds=2;
 }
 message FetchTopicListResp{
   int32 code=1;

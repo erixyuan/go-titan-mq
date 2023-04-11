@@ -2,6 +2,7 @@ import axios from 'axios';
 
 export interface TopicRecord {
     name: string;
+    queueIds : number[];
 }
 
 export interface TopicListRes {

@@ -1,6 +1,6 @@
 <template>
   <div class="container">
-    <Breadcrumb :items="['menu.list', '消息列表']" />
+    <Breadcrumb :items="['消息页', '消息列表']" />
     <a-card class="general-card" title="消息列表">
       <a-row>
         <a-col :flex="1">
@@ -12,22 +12,17 @@
           >
             <a-row :gutter="16">
               <a-col :span="8">
-                <a-form-item
-                    field="filterType"
-                    label="主题"
-                >
+                <a-form-item field="topic" label="主题">
                   <a-select
-                      v-model="formModel.topic"
-                      :options="filterTopicOptions"
-                      placeholder="请选择主题"
+                    v-model="formModel.topic"
+                    :options="filterTopicOptions"
+                    placeholder="请选择主题"
+                    @change="selectTopicChange"
                   />
                 </a-form-item>
               </a-col>
               <a-col :span="8">
-                <a-form-item
-                  field="queueId"
-                  label="消费队列"
-                >
+                <a-form-item field="queueId" label="消费队列">
                   <a-select
                     v-model="formModel.queueId"
                     :options="queueIdOptions"
@@ -35,25 +30,18 @@
                   />
                 </a-form-item>
               </a-col>
-
             </a-row>
           </a-form>
         </a-col>
         <a-divider style="height: 84px" direction="vertical" />
         <a-col :flex="'86px'" style="text-align: right">
           <a-space direction="vertical" :size="18">
-            <a-button type="primary" @click="search">
-              <template #icon>
-                <icon-search />
-              </template>
-              搜索
-            </a-button>
-            <a-button @click="reset">
-              <template #icon>
-                <icon-refresh />
-              </template>
-              重置
-            </a-button>
+            <a-button type="primary" @click="search"
+              ><template #icon><icon-search /></template>搜索</a-button
+            >
+            <a-button @click="reset"
+              ><template #icon><icon-refresh /></template>重置</a-button
+            >
           </a-space>
         </a-col>
       </a-row>
@@ -69,9 +57,7 @@
             </a-button>
             <a-upload action="/">
               <template #upload-button>
-                <a-button>
-                  导入
-                </a-button>
+                <a-button>导入</a-button>
               </template>
             </a-upload>
           </a-space>
@@ -84,7 +70,7 @@
             <template #icon>
               <icon-download />
             </template>
-            {{ $t('mqTable.operation.download') }}
+            下载
           </a-button>
           <a-tooltip :content="$t('mqTable.actions.refresh')">
             <div class="action-icon" @click="search"
@@ -126,7 +112,9 @@
                     <div>
                       <a-checkbox
                         v-model="item.checked"
-                        @change="handleChange($event, item as TableColumnData, index)"
+                        @change="
+                          handleChange($event, item as TableColumnData, index)
+                        "
                       >
                       </a-checkbox>
                     </div>
@@ -150,53 +138,6 @@
         :size="size"
         @page-change="onPageChange"
       >
-        <template #index="{ rowIndex }">
-          {{ rowIndex + 1 + (pagination.current - 1) * pagination.pageSize }}
-        </template>
-        <template #contentType="{ record }">
-          <a-space>
-            <a-avatar
-              v-if="record.contentType === 'img'"
-              :size="16"
-              shape="square"
-            >
-              <img
-                alt="avatar"
-                src="//p3-armor.byteimg.com/tos-cn-i-49unhts6dw/581b17753093199839f2e327e726b157.svg~tplv-49unhts6dw-image.image"
-              />
-            </a-avatar>
-            <a-avatar
-              v-else-if="record.contentType === 'horizontalVideo'"
-              :size="16"
-              shape="square"
-            >
-              <img
-                alt="avatar"
-                src="//p3-armor.byteimg.com/tos-cn-i-49unhts6dw/77721e365eb2ab786c889682cbc721c1.svg~tplv-49unhts6dw-image.image"
-              />
-            </a-avatar>
-            <a-avatar v-else :size="16" shape="square">
-              <img
-                alt="avatar"
-                src="//p3-armor.byteimg.com/tos-cn-i-49unhts6dw/ea8b09190046da0ea7e070d83c5d1731.svg~tplv-49unhts6dw-image.image"
-              />
-            </a-avatar>
-            {{ $t(`mqTable.form.contentType.${record.contentType}`) }}
-          </a-space>
-        </template>
-        <template #filterType="{ record }">
-          {{ $t(`mqTable.form.filterType.${record.filterType}`) }}
-        </template>
-        <template #status="{ record }">
-          <span v-if="record.status === 'offline'" class="circle"></span>
-          <span v-else class="circle pass"></span>
-          {{ $t(`mqTable.form.status.${record.status}`) }}
-        </template>
-        <template #operations>
-          <a-button v-permission="['admin']" type="text" size="small">
-            {{ $t('mqTable.columns.operations.view') }}
-          </a-button>
-        </template>
       </a-table>
     </a-card>
   </div>
@@ -206,16 +147,17 @@
   import { computed, ref, reactive, watch, nextTick } from 'vue';
   import { useI18n } from 'vue-i18n';
   import useLoading from '@/hooks/loading';
-  import { queryPolicyList, PolicyRecord, PolicyParams } from '@/api/list';
   import { Pagination } from '@/types/global';
   import type { SelectOptionData } from '@arco-design/web-vue/es/select/interface';
   import type { TableColumnData } from '@arco-design/web-vue/es/table/interface';
   import cloneDeep from 'lodash/cloneDeep';
   import Sortable from 'sortablejs';
-  import {MessageParams, MessageRecord, queryMessageList} from "@/api/message";
-  import {ComputedGetter, queryTopicList} from "@/api/topic";
-  import {SelectOption} from "@arco-design/web-vue/es/select/interface";
-  import {newArray} from "@arco-design/web-vue/es/date-picker/utils";
+  import {
+    MessageParams,
+    MessageRecord,
+    queryMessageList,
+  } from '@/api/message';
+  import { queryTopicList, TopicRecord } from '@/api/topic';
 
   type SizeProps = 'mini' | 'small' | 'medium' | 'large';
   type Column = TableColumnData & { checked?: true };
@@ -225,7 +167,7 @@
       number: '',
       name: '',
       queueId: 0,
-      topic: ""
+      topic: '',
     };
   };
   const { loading, setLoading } = useLoading(true);
@@ -264,82 +206,73 @@
   ]);
   const columns = computed<TableColumnData[]>(() => [
     {
-      title: "逻辑偏移",
+      title: '逻辑偏移',
       dataIndex: 'offset',
       slotName: 'offset',
     },
     {
-      title: "消息ID",
+      title: '消息ID',
       dataIndex: 'messageId',
     },
     {
-      title: "HashCode",
+      title: 'HashCode',
       dataIndex: 'tagHashCode',
     },
     {
-      title: "大小",
+      title: '大小',
       dataIndex: 'size',
       slotName: 'size',
     },
     {
-      title: "物理偏移",
+      title: '物理偏移',
       dataIndex: 'commitLogOffset',
     },
   ]);
-  const queueIdOptions = computed<SelectOptionData[]>(() => {
-    return [{
-              label: "队列0",
-              value: 0,
-            },
-            {
-              label: "队列1",
-              value: 1,
-            }]
-  });
-  // const filterTopicOptions = computed<SelectOptionData[]>(() => [
-  //   {
-  //     label: "news",
-  //     value: 'news',
-  //   },
-  // ]);
-  const filterTopicOptions = ref<SelectOptionData[] | null>(null)
 
-  // const filterTopicOptions = computed<SelectOptionData[]>(() =>{
-  //   queryTopicList().then((response) => {
-  //     for (let i = 0; i < response.data.list.length; i++) {
-  //       formModel.value.topic.value = response.data.list.map((item:any)=>({
-  //         label: response.data.list[i].name,
-  //         value: 'news',
-  //       }));
-  //     }
-  //   })
-  //   return formModel.value.topic
-  // });
-  const fetchTopicData = async ()=>{
+  // 主题选择下拉
+  let topicList = ref<TopicRecord[] | null>();
+  const filterTopicOptions = ref<SelectOptionData[]>();
+  const queueIdOptions = ref<SelectOptionData[]>();
+  const fetchTopicData = async () => {
     setLoading(true);
-    const {data}  = await queryTopicList()
-    console.log(data)
-    filterTopicOptions.value = data.list.map((item:any)=>({
+    const { data } = await queryTopicList();
+    topicList = ref(data.list);
+    filterTopicOptions.value = data.list.map((item: any) => ({
       label: item.name,
       value: item.name,
-    }))
-    console.log(filterTopicOptions)
+    }));
+    // 初始化下拉选项中的第一个
+    const [first] = data.list;
+    selectTopic(first);
+  };
+  function selectTopic(t: TopicRecord) {
+    formModel.value.topic = t.name;
+    if (t.queueIds != null && t.queueIds.length > 0) {
+      queueIdOptions.value = t.queueIds.map((item: number) => ({
+        label: `${item}队列`,
+        value: item,
+      }));
+    } else {
+      queueIdOptions.value = [];
+    }
   }
-  fetchTopicData()
+  function selectTopicChange() {
+    topicList.value?.forEach(function (el) {
+      if (el.name === formModel.value.topic) {
+        selectTopic(el);
+      }
+    });
+  }
+  fetchTopicData();
 
-  const statusOptions = computed<SelectOptionData[]>(() => [
-    {
-      label: t('mqTable.form.status.online'),
-      value: 'online',
-    },
-    {
-      label: t('mqTable.form.status.offline'),
-      value: 'offline',
-    },
-  ]);
-
+  // 拉取数据
   const fetchData = async (
-    params: MessageParams = { current: 1, pageSize: 20 , topic:"news", queueId:1}
+    params: MessageParams = {
+      current: 1,
+      pageSize: 20,
+      topic: formModel.value.topic,
+      queueId: formModel.value.queueId,
+    }
   ) => {
     setLoading(true);
     try {
@@ -348,7 +281,7 @@
       pagination.current = params.current;
       pagination.total = data.total;
     } catch (err) {
-      alert(err)
+      alert(err);
     } finally {
       setLoading(false);
     }
@@ -361,10 +294,9 @@
     } as unknown as MessageParams);
   };
   const onPageChange = (current: number) => {
-    fetchData({ ...basePagination, current });
+    // fetchData({ ...basePagination, current });
   };
 
-  fetchData();
   const reset = () => {
     formModel.value = generateFormModel();
   };
