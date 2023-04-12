@@ -77,7 +77,7 @@ func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGrou
 					topic:         topicName,
 					consumerGroup: consumerGroupName,
 					queueId:       qid,
-					clientId:      "",
+					clientId:      ReBalance,
 					offset:        0,
 				})
 			}

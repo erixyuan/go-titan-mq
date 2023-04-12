@@ -121,7 +121,11 @@ func (b *Broker) ListeningClient(conn net.Conn) {
 			Log.Errorf("读取客户端数据异常: %v\n", err)
 			if err == io.EOF {
 				Log.Infof("客户端连接断开：%s | %s，剔除client", conn.RemoteAddr(), b.clients[conn])
-				b.RemoveClient(b.clients[conn].ClientID)
+				if _, ok := b.clients[conn]; ok {
+					b.RemoveClient(b.clients[conn].ClientID)
+				} else {
+					Log.Errorf("客户端找不到:%s ", conn.RemoteAddr())
+				}
 			}
 			return
 		}
@@ -275,7 +279,7 @@ func (b *Broker) CheckHeartbeatHandler() {
 		clearFlag := false
 		for _, c := range b.clients {
 			if c.LastHeartbeat.Add(HeartbeatTimeout).Before(time.Now()) && c.Status == 1 {
-				Log.Infof("发现客户端超时了 ClientId:%s", c.ClientID)
+				Log.Infof("发现客户端超时了 ClientId:%s, 上一次心跳的时间:%+v", c.ClientID, c.LastHeartbeat)
 				c.Status = 0
 				clearFlag = true
 				if err := b.RemoveClient(c.ClientID); err != nil {
@@ -293,6 +297,7 @@ func (b *Broker) CheckHeartbeatHandler() {
 }
 
 func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn, requestId string) {
+	Log.Infof("HeartbeatHandler - 收到心跳请求 [requestId:%s]", requestId)
 	req := &protocol.HeartbeatRequestData{}
 	if err := proto.Unmarshal(body, req); err != nil {
 		Log.Infof("HeartbeatHandler - error: [requestId:%s] %v", requestId, err)
@@ -340,7 +345,7 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 	responseData.ConsumerGroup = consumerGroupName
 	responseData.QueueId = queueId
 	responseData.Messages = make([]*protocol.Message, 0)
-	Log.Debugf("收到拉取数据请求：%+v", data)
+	Log.Infof("收到拉取数据请求：%+v", data)
 	// 检查topic是否存在
 	if topic, ok := b.topics[topicName]; !ok {
 		//b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
@@ -349,12 +354,10 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 		// 检查消费组是否存在
 		if consumerGroup, ok := topic.consumerGroups[consumerGroupName]; !ok {
 			Log.Infof("PullMessageHandler error: 消费组不存在")
-			//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrConsumerGroupNotExist)
 			goto ReturnPullMessageData
 		} else {
 			if _, ok := consumerGroup.Clients[clientId]; !ok {
 				Log.Errorf("PullMessageHandler error: ClientId不存在")
-				//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrRequest)
 				goto ReturnPullMessageData
 			}
 			// 从路由标找到当前的client
@@ -362,7 +365,6 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 			// 判断队列Id是否是分配的
 			if !tools.ContainsInt(queueIds, queueId) {
 				Log.Errorf("PullMessageHandler error: 队列不存在")
-				//b.Return(conn, protocol.OpaqueType_PullMessage, nil, ErrQueueId)
 				goto ReturnPullMessageData
 			} else {
 				// 找到之前分配的channel

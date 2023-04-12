@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/erixyuan/go-titan-mq/broker"
+	"github.com/erixyuan/go-titan-mq/protocol"
 	"github.com/erixyuan/go-titan-mq/sdk"
 	"github.com/sirupsen/logrus"
 	"log"
@@ -18,10 +19,15 @@ func main() {
 	Log.SetReportCaller(true)
 
 	go func() {
+		var messageNums int
 		topic := "news"
 		consumerGroupName := "GID-C-01"
 		titanClient := sdk.TitanConsumerClient{}
-		titanClient.Init("localhost:9999", topic, consumerGroupName)
+		titanClient.Init("localhost:9999", topic, consumerGroupName, func(message *protocol.Message) error {
+			messageNums++
+			Log.Infof("收到%d个消息", messageNums)
+			return nil
+		})
 		if err := titanClient.Start(); err != nil {
 			Log.Fatalf("连接服务器异常 error %+v", err)
 			return

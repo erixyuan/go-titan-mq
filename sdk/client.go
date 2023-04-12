@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/erixyuan/go-titan-mq/broker"
 	"github.com/erixyuan/go-titan-mq/protocol"
+	"github.com/erixyuan/go-titan-mq/tools"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -19,19 +20,21 @@ import (
 var ok = "ok"
 var subscribe = "subscribe"
 var requestIdKey = "requestId"
+var QueueStateNormal = 1
+var QueueStateIdel = 2
 
 type TitanConsumerClient struct {
 	address           string
 	timeout           time.Duration
 	retryTime         time.Duration
 	conn              net.Conn
-	callback          map[string]func(broker.Message)
+	callback          func(message *protocol.Message) error
 	acceptIsOpen      bool
 	clientId          string
 	consumerGroupName string
 	topic             string
-	queues            []*protocol.ConsumeProgress
-	queueOffset       map[int32]int64
+	queues            map[int]*protocol.ConsumeProgress
+	queueState        map[int]int
 	pullMessageSize   int32
 	NextConsumeOffset int64 // 下一个消费的offset
 	pullMessageLock   bool  // 拉取消息锁，保证消费完当前拉取的数据，再进行下一次拉取
@@ -40,18 +43,19 @@ type TitanConsumerClient struct {
 }
 
 // 创建客户端
-func (t *TitanConsumerClient) Init(address string, topic string, name string) {
+func (t *TitanConsumerClient) Init(address string, topic string, consumerGroupName string, f func(message *protocol.Message) error) {
 	t.address = address
 	t.timeout = 1 * time.Second
 	t.retryTime = 1 * time.Second
-	t.callback = make(map[string]func(broker.Message))
+	t.callback = f
 	t.acceptIsOpen = false
 	t.topic = topic
 	t.clientId = GenerateSerialNumber("CLIENT")
-	t.consumerGroupName = name
+	t.consumerGroupName = consumerGroupName
 	t.pullMessageSize = 5
-	t.queueOffset = make(map[int32]int64)
+	t.queueState = make(map[int]int) // 标记队列的状态，如果1:正常，2:上一次拉取没有数据，根据这个选择队列的权重
 	t.queueOffsetLock = sync.Mutex{}
+	t.queues = make(map[int]*protocol.ConsumeProgress)
 }
 
 // 设置超时时间
@@ -164,9 +168,9 @@ func (t *TitanConsumerClient) accept() {
 								log.Printf("收取订阅消息异常 error: %v", err)
 							} else {
 								//log.Printf("收取订阅消息内容: %+v", responseData)
-								if responseData.ConsumeProgress != nil && len(responseData.ConsumeProgress) > 0 {
-									t.queues = responseData.ConsumeProgress
-								}
+								//if responseData.ConsumeProgress != nil && len(responseData.ConsumeProgress) > 0 {
+								//	t.queues = responseData.ConsumeProgress
+								//}
 								// 开启同步
 								go t.SendSyncTopicInfo()
 								go t.SendHeartbeat()
@@ -205,8 +209,29 @@ func (t *TitanConsumerClient) PullMessage() {
 
 		// 随机获取一个队列
 		rand.Seed(time.Now().UnixNano())
-		randQueueIndex := rand.Intn(len(t.queues))
-		queue := t.queues[randQueueIndex]
+		// 选择队列
+		// 先排除掉上一次拉不到数据的队列
+		var queueIndexList []int
+		var randQueueIndex int
+		var queue *protocol.ConsumeProgress
+		for _, q := range t.queues {
+			if qs, ok := t.queueState[int(q.QueueId)]; ok {
+				if qs == QueueStateIdel {
+					continue
+				}
+			} else {
+				t.queueState[int(q.QueueId)] = QueueStateNormal
+			}
+			queueIndexList = append(queueIndexList, int(q.QueueId))
+		}
+		if len(queueIndexList) > 0 {
+			randQueueIndex = queueIndexList[rand.Intn(len(queueIndexList))]
+			queue = t.queues[randQueueIndex]
+		} else {
+			// 随机获取map中的一个元素
+			queue = tools.GetRandomValue(t.queues)
+		}
+
 		requestData := protocol.PullMessageRequestData{
 			ClientId:      t.clientId,
 			Topic:         t.topic,
@@ -215,9 +240,10 @@ func (t *TitanConsumerClient) PullMessage() {
 			QueueId:       queue.QueueId, // 随机获取一个队列
 			Offset:        queue.Offset,
 		}
-		log.Printf("开始拉取数据, ClientId %s,offset:%d, queueId:%d, pullSize:%d", t.clientId, queue.Offset, queue.QueueId, t.pullMessageSize)
+		requestId := uuid.New().String()
+		log.Printf("PullMessage - 开始拉取数据, requestId:%s, ClientId %s, offset:%d, queueId:%d, pullSize:%d", requestId, t.clientId, queue.Offset, queue.QueueId, t.pullMessageSize)
 		requestDataBytes, _ := proto.Marshal(&requestData)
-		t.SendCommand(protocol.OpaqueType_PullMessage, requestDataBytes)
+		t.SendCommandWithRequestId(protocol.OpaqueType_PullMessage, requestDataBytes, requestId)
 		t.pullMessageLock = false // 加上锁，等待处理了上一次的消息之后才发下一次请求
 
 	}
@@ -225,25 +251,42 @@ func (t *TitanConsumerClient) PullMessage() {
 }
 
 func (t *TitanConsumerClient) ProcessPullMessageHandler(resp *protocol.PullMessageResponseData, requestId string) {
-	t.queueOffsetLock.Lock()
-	queueId := resp.QueueId
-	var offset int64
-	for _, msg := range resp.Messages {
-		log.Printf("收到消息 - %s: msgId:%+v, QueueId:%d, QueueOffset:%d", requestId, msg.MsgId, msg.QueueId, msg.QueueOffset)
-		// 消费完之后，更新当前的消费offset
-		for _, q := range t.queues {
-			if q.Offset > offset {
-				offset = q.Offset
-			}
-			if q.QueueId == msg.QueueId && msg.QueueOffset >= q.Offset {
-				q.Offset = msg.QueueOffset + 1
+	queueId := int(resp.QueueId)
+	if len(resp.Messages) > 0 {
+		t.queueOffsetLock.Lock()
+		var maxOffset int64
+		for _, msg := range resp.Messages {
+			log.Printf("收到消息 - %s: msgId:%+v, QueueId:%d, QueueOffset:%d", requestId, msg.MsgId, msg.QueueId, msg.QueueOffset)
+			t.callback(msg)
+			// 消费完之后，更新当前的消费offset
+
+			// 获取当前批次最大的偏移量
+			//if q.Offset > maxOffset {
+			//	maxOffset = q.Offset
+			//}
+			//匹配当前获取消息的队列，如果消息的的偏移量比客户端维护的队列偏移量大，更新客户端的偏移量
+			if msg.QueueOffset >= maxOffset {
+				maxOffset = msg.QueueOffset // 下一个偏移量
 			}
 		}
+		// 偏移量往前
+		if t.queues[queueId].Offset <= maxOffset {
+			t.queues[queueId].Offset = maxOffset + 1
+			log.Infof("更新队列[%d]的下一个偏移量为[%d] [%+v]", queueId, maxOffset+1, t.queues[queueId])
+		}
+		if len(resp.Messages) < int(t.pullMessageSize) {
+			t.queueState[queueId] = 2
+		} else {
+			t.queueState[queueId] = 1
+		}
+
+		// 发送确认消息
+		go t.SyncConsumeOffset(int32(queueId), maxOffset)
+		t.queueOffsetLock.Unlock()
+	} else {
+		t.queueState[queueId] = 2
 	}
-	t.queueOffsetLock.Unlock()
-	// 发送确认消息
-	go t.SyncConsumeOffset(queueId, offset)
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 	t.pullMessageLock = true //解锁，可以继续拉数据了
 }
 
@@ -285,7 +328,7 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 	for {
 		if t.clientId != "" {
 			//var consumeProgress = make([]*protocol.ConsumeProgress, 0)
-			//for queueId, offset := range t.queueOffset {
+			//for queueId, offset := range t.queueState {
 			//	consumeProgress = append(consumeProgress, &protocol.ConsumeProgress{
 			//		QueueId: queueId, // 由于0值会丢失，所以模式加一
 			//		Offset:  offset,
@@ -297,7 +340,7 @@ func (t *TitanConsumerClient) SendHeartbeat() {
 				ConsumerGroup: t.consumerGroupName,
 				ClientId:      t.clientId,
 			}
-			log.Printf("SendHeartbeat - 发送心跳请求 - [requestId:requestId][%+v]", req)
+			log.Infof("SendHeartbeat - 发送心跳请求 - [requestId:%s][%+v]", requestId, req)
 			bytes, _ := proto.Marshal(req)
 			t.SendCommandWithRequestId(protocol.OpaqueType_Heartbeat, bytes, requestId)
 		}
@@ -355,11 +398,14 @@ func (t *TitanConsumerClient) SendCommandWithRequestId(opaque protocol.OpaqueTyp
 			log.Printf("发送请求异常: %v", err)
 			return
 		}
-		log.Printf("SendCommandWithRequestId - %s 发送请求成功 ", requestId)
+		log.Debugf("SendCommandWithRequestId - %s 发送请求成功 ", requestId)
 	}()
 
 }
 
+/**
+同步消费队列
+*/
 func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {
 	var resp protocol.SyncTopicRouteResponseData
 	if err := proto.Unmarshal(body, &resp); err != nil {
@@ -367,28 +413,59 @@ func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {
 		return
 	}
 	log.Printf("收到同步主题的消息, 队列：%+v", resp.ConsumeProgress)
-	t.queueOffsetLock.Lock()
+	t.queueOffsetLock.Lock() // 先上锁，更新当前的分配的消费队列
 	defer t.queueOffsetLock.Unlock()
-	newQueue := make(map[int32]*protocol.ConsumeProgress)
 	// 这里需要交叉对比, 因为队列可能会增减，先与同步过来的信息对其
-	for _, q := range resp.ConsumeProgress {
-		newQueue[q.QueueId] = q
-	}
+	// 如果返回的长度比当前的客户端长度更长，代表扩展了队列，客户端新增队列
 
-	for _, q := range t.queues {
-		if nq, ok := newQueue[q.QueueId]; !ok {
-			continue
-		} else {
-			if nq.Offset > q.Offset {
-				q.Offset = nq.Offset // 取最大的offset
+	// 1、先遍历最新的队列，看本地队列是否存在
+	for _, c := range resp.ConsumeProgress {
+		if q, ok := t.queues[int(c.QueueId)]; ok {
+			// 如果存在比较偏移量
+			if c.Offset > q.Offset {
+				log.Infof("同步到的最新队列[%d]偏移量[%d]大于客户端的[%d]，更新", q.QueueId, c.Offset, q.Offset)
+				q.Offset = c.Offset
 			}
+		} else {
+			// 如果不存在就新增
+			t.queues[int(c.QueueId)] = c
 		}
 	}
-	result := make([]*protocol.ConsumeProgress, 0)
-	for _, q := range newQueue {
-		result = append(result, q)
+
+	// 2、遍历本地队列，剔除不存在的队列
+	for k, q := range t.queues {
+		isExist := false
+		for _, c := range resp.ConsumeProgress {
+			if c.QueueId == q.QueueId {
+				isExist = true
+				break
+			}
+		}
+		if isExist == false {
+			log.Infof("当前队列[%d]已经弃用，准备删除", q.QueueId)
+			delete(t.queues, k)
+		}
 	}
-	t.queues = result
+
+	//for _, q := range resp.ConsumeProgress {
+	//	newQueue[q.QueueId] = q
+	//}
+	//
+	//for _, q := range t.queues {
+	//	if nq, ok := newQueue[q.QueueId]; !ok {
+	//		t.queues[int(q.QueueId)] = nq
+	//	} else {
+	//		if nq.Offset > q.Offset {
+	//			log.Infof("同步到的队列[%d]偏移量[%d]大于客户端的[%d]，更新", q.QueueId, nq.Offset, q.Offset)
+	//			q.Offset = nq.Offset // 取最大的offset
+	//		}
+	//	}
+	//}
+	//result := make([]*protocol.ConsumeProgress, 0)
+	//for _, q := range newQueue {
+	//	result = append(result, q)
+	//}
+	//t.queues = result
 }
 
 func GenerateSerialNumber(prefix string) string {
