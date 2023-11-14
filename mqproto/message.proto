@@ -20,6 +20,8 @@ enum OpaqueType {
     Heartbeat = 6;
     // 同步消费进去
     SyncConsumeOffset = 7;
+    // 重新平衡通知
+    ReBalance = 8;
 }
 
 message RemotingCommandHeader{
@@ -136,4 +138,15 @@ message AddTopicRequest {
 message AddConsumerGroupRequest {
     string topicName = 1;
     string groupName = 2;
+}
+
+message ReBalanceRequest {
+    string topic = 1;
+    string consumerGroup = 2;
+}
+
+message ReBalanceResponse {
+    string topic = 1;
+    string consumerGroup = 2;
+    bool IsOk = 3;
 }

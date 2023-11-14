@@ -23,6 +23,7 @@ type TopicRouteRecord struct {
 	queueId         int
 	clientId        string
 	offset          int64
+	maxSendOffset   int64
 	lastConsumeTime time.Time
 }
 
@@ -65,7 +66,7 @@ func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGrou
 			}
 
 			// 更新
-			log.Printf("topics %+v", t.topics)
+			Log.Infof("topics %+v", t.topics)
 			t.topics[topicName].consumerGroups[consumerGroupName] = &ConsumerGroup{
 				TopicName: topicName,
 				GroupName: consumerGroupName,
@@ -81,7 +82,7 @@ func (t *TopicRouteManager) RegisterConsumerGroup(topicName string, consumerGrou
 					offset:        0,
 				})
 			}
-			log.Printf("创建消费组成功：+%v", topic.ConsumerGroups[consumerGroupName])
+			Log.Infof("创建消费组成功：+%v", topic.ConsumerGroups[consumerGroupName])
 		}
 	}
 	return nil
@@ -96,7 +97,7 @@ func (t *TopicRouteManager) RegisterConsumer(topicName string, consumerGroupName
 		LastHeartbeat: time.Now(),
 		Status:        1,
 	}
-	log.Printf("RegisterConsumer 开始注册消费者；+%v", client)
+	Log.Infof("RegisterConsumer 开始注册消费者；+%v", client)
 	t.topics[topicName].consumerGroups[consumerGroupName].Clients[clientId] = &client
 	return &client, nil
 }
@@ -133,7 +134,7 @@ func (t *TopicRouteManager) Init() (map[string]*Topic, error) {
 		if err := json.Unmarshal(bytes, &t.topicDb); err != nil {
 			log.Fatal("json.Unmarshal异常：", err)
 		} else {
-			log.Printf("读取topic.db成功 %+v", t.topicDb)
+			Log.Infof("读取topic.db成功 %+v", t.topicDb)
 			flushFlag := false
 			for topicName, d := range t.topicDb {
 				t.topics[topicName] = RecoverTopic(topicName, len(d.Queue))
@@ -225,7 +226,7 @@ func (t *TopicRouteManager) Flush() error {
 
 // 从路由表中获取当前client分配到的队列
 func (t *TopicRouteManager) FindQueueId(topicName string, consumerGroupName string, clientId string) []int32 {
-	log.Printf("开始查看client:[%s][%s][%s]分配的queue", topicName, consumerGroupName, clientId)
+	Log.Infof("开始查看client:[%s][%s][%s]分配的queue", topicName, consumerGroupName, clientId)
 	var queueIds []int32
 	for _, record := range t.table {
 		if record.topic == topicName && record.consumerGroup == consumerGroupName && record.clientId == clientId {
@@ -236,7 +237,7 @@ func (t *TopicRouteManager) FindQueueId(topicName string, consumerGroupName stri
 }
 
 func (t *TopicRouteManager) FindQueues(topicName string, consumerGroupName string, clientId string) []*protocol.ConsumeProgress {
-	log.Printf("开始查看client:[%s][%s][%s]分配的queue", topicName, consumerGroupName, clientId)
+	Log.Infof("开始查看client:[%s][%s][%s]分配的queue", topicName, consumerGroupName, clientId)
 	var queues []*protocol.ConsumeProgress
 	for _, record := range t.table {
 		if record.topic == topicName && record.consumerGroup == consumerGroupName && record.clientId == clientId {

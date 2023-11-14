@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -56,6 +57,12 @@ func (t *TitanConsumerClient) Init(address string, topic string, consumerGroupNa
 	t.queueState = make(map[int]int) // 标记队列的状态，如果1:正常，2:上一次拉取没有数据，根据这个选择队列的权重
 	t.queueOffsetLock = sync.Mutex{}
 	t.queues = make(map[int]*protocol.ConsumeProgress)
+
+	log.SetLevel(log.InfoLevel)
+	log.SetOutput(os.Stdout)
+	log.SetFormatter(&log.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05.000",
+	})
 }
 
 // 设置超时时间
@@ -152,43 +159,60 @@ func (t *TitanConsumerClient) accept() {
 					}
 				}
 			} else {
-				remotingCommandResp := protocol.RemotingCommand{}
-				if err = proto.Unmarshal(buf[:n], &remotingCommandResp); err != nil {
-					log.Printf("remotingCommandResp error: %v", err)
-				} else {
-					if remotingCommandResp.Header.Code != 200 {
-						log.Printf("请求返回异常：%+v", remotingCommandResp)
-						log.Printf("请求返回异常：%s", string(remotingCommandResp.Body))
-					} else {
-						switch remotingCommandResp.Header.Opaque {
-						case protocol.OpaqueType_Subscription:
-							//log.Printf("收到订阅消息的响应")
-							responseData := protocol.SubscriptionResponseData{}
-							if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
-								log.Printf("收取订阅消息异常 error: %v", err)
-							} else {
-								//log.Printf("收取订阅消息内容: %+v", responseData)
-								//if responseData.ConsumeProgress != nil && len(responseData.ConsumeProgress) > 0 {
-								//	t.queues = responseData.ConsumeProgress
-								//}
-								// 开启同步
-								go t.SendSyncTopicInfo()
-								go t.SendHeartbeat()
-							}
-						case protocol.OpaqueType_SyncTopicRouteInfo:
-							go t.SyncTopicInfoHandler(remotingCommandResp.Body)
-						case protocol.OpaqueType_Unsubscription:
-						case protocol.OpaqueType_Publish:
-						case protocol.OpaqueType_PullMessage:
-							//log.Printf("收到消息返回")
-							responseData := protocol.PullMessageResponseData{}
-							//log.Printf("responseData md5:%d", md5.Sum(remotingCommandResp.Body))
-							if err = proto.Unmarshal(remotingCommandResp.Body, &responseData); err != nil {
-								log.Fatal("remotingCommandResp error: %v", err)
-							} else {
-								t.ProcessPullMessageHandler(&responseData, remotingCommandResp.RequestId)
-							}
+
+				remotingCommand := &protocol.RemotingCommand{}
+				err = proto.Unmarshal(buf[:n], remotingCommand)
+				if err != nil {
+					log.Errorf("收到请求体，内容异常: error +%v", err)
+					continue
+				}
+				if remotingCommand.Header.Code != 200 {
+					log.Printf("请求返回异常：%+v", remotingCommand)
+					continue
+				}
+				// 收到的请求
+				if remotingCommand.Type == protocol.RemotingCommandType_RequestCommand {
+					switch remotingCommand.Header.Opaque {
+					case protocol.OpaqueType_ReBalance:
+						responseData := protocol.ReBalanceRequest{}
+						if err = proto.Unmarshal(remotingCommand.Body, &responseData); err != nil {
+							log.Printf("收取订阅消息异常 error: %v", err)
+						} else {
+
 						}
+						t.ReBalanceHandler(&responseData)
+					}
+				} else if remotingCommand.Type == protocol.RemotingCommandType_ResponseCommand {
+					// 收到的回复
+					switch remotingCommand.Header.Opaque {
+					case protocol.OpaqueType_Subscription:
+						//log.Printf("收到订阅消息的响应")
+						responseData := protocol.SubscriptionResponseData{}
+						if err = proto.Unmarshal(remotingCommand.Body, &responseData); err != nil {
+							log.Printf("收取订阅消息异常 error: %v", err)
+						} else {
+							//log.Printf("收取订阅消息内容: %+v", responseData)
+							//if responseData.ConsumeProgress != nil && len(responseData.ConsumeProgress) > 0 {
+							//	t.queues = responseData.ConsumeProgress
+							//}
+							// 开启同步
+							go t.SendSyncTopicInfo()
+							go t.SendHeartbeat()
+						}
+					case protocol.OpaqueType_SyncTopicRouteInfo:
+						go t.SyncTopicInfoHandler(remotingCommand.Body)
+					case protocol.OpaqueType_Unsubscription:
+					case protocol.OpaqueType_Publish:
+					case protocol.OpaqueType_PullMessage:
+						//log.Printf("收到消息返回")
+						responseData := protocol.PullMessageResponseData{}
+						//log.Printf("responseData md5:%d", md5.Sum(remotingCommandResp.Body))
+						if err = proto.Unmarshal(remotingCommand.Body, &responseData); err != nil {
+							log.Fatal("remotingCommandResp error: %v", err)
+						} else {
+							t.ProcessPullMessageHandler(&responseData, remotingCommand.RequestId)
+						}
+
 					}
 				}
 			}
@@ -466,6 +490,11 @@ func (t *TitanConsumerClient) SyncTopicInfoHandler(body []byte) {
 	//	result = append(result, q)
 	//}
 	//t.queues = result
+}
+
+func (t *TitanConsumerClient) ReBalanceHandler(body *protocol.ReBalanceRequest) {
+	log.Infof("ReBalanceHandler - 收到rebalance的通知")
+
 }
 
 func GenerateSerialNumber(prefix string) string {

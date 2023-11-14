@@ -41,6 +41,7 @@ type Broker struct {
 	topicsFile         *os.File
 	topicRouteManager  *TopicRouteManager
 	reBalanceMap       map[string]bool // string = topic_groupName
+	reBalanceLock      sync.Mutex
 }
 
 func NewBroker() *Broker {
@@ -51,6 +52,7 @@ func NewBroker() *Broker {
 		consumerGroupLock:  sync.Mutex{},
 		consumerClientLock: sync.Mutex{},
 		commitLogMutex:     sync.Mutex{},
+		reBalanceLock:      sync.Mutex{},
 		reBalanceMap:       make(map[string]bool),
 	}
 	return &broker
@@ -203,7 +205,7 @@ func (b *Broker) SubscribeHandler(body []byte, conn net.Conn) {
 			} else {
 				// 注册消费者
 				if client, err := b.topicRouteManager.RegisterConsumer(topicName, consumerGroupName, clientId, conn); err != nil {
-					Log.Infof("SubscribeHandler error: %+v", err)
+					Log.Errorf("SubscribeHandler error: %+v", err)
 				} else {
 					// 登记入当前的客户端表，方便查询
 					Log.Infof("SubscribeHandler 登记clientId %s->%s", conn.RemoteAddr(), clientId)
@@ -244,11 +246,6 @@ func (b *Broker) SyncConsumeOffsetHandler(body []byte, conn net.Conn, requestId 
 	} else {
 		if req.Offset > record.offset {
 			record.offset = req.Offset
-		}
-		// 获取到当前的消息, 判断当前是否准备rebalance，如果是的把队列的锁交给rebalance
-		key := b.GetReBalanceKey(req.Topic, req.ConsumerGroup)
-		if flag, ok := b.reBalanceMap[key]; ok && flag == true {
-			record.clientId = ReBalance
 		}
 	}
 }
@@ -324,7 +321,6 @@ func (b *Broker) HeartbeatHandler(body []byte, conn net.Conn, requestId string) 
 找到对应的channel，进行读取
 */
 func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string) {
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	data := &protocol.PullMessageRequestData{}
@@ -339,6 +335,8 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 	pullSize := data.PullSize
 	queueId := data.QueueId
 	offset := data.Offset
+	// 检查是否有重排序
+	b.CheckReBalanceAndSetClientFlag(topicName, consumerGroupName, queueId, clientId)
 	// 构建返回数据
 	responseData := protocol.PullMessageResponseData{}
 	responseData.Topic = topicName
@@ -346,6 +344,7 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 	responseData.QueueId = queueId
 	responseData.Messages = make([]*protocol.Message, 0)
 	Log.Infof("收到拉取数据请求：%+v", data)
+	var maxSendOffset int64
 	// 检查topic是否存在
 	if topic, ok := b.topics[topicName]; !ok {
 		//b.ReturnWithRequestId(requestId, conn, protocol.OpaqueType_PullMessage, nil, ErrMessageNotYet)
@@ -413,6 +412,9 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 				for {
 					select {
 					case message := <-consumeQueue.messageChan:
+						if message.QueueOffset > maxSendOffset {
+							maxSendOffset = message.QueueOffset
+						}
 						Log.Debugf("开始组转消息， msgId: %s, QueueId: %d, QueueOffset:%d", message.MsgId, message.QueueId, message.QueueOffset)
 						responseData.Messages = append(responseData.Messages, message)
 					case <-fetchDataChanDone:
@@ -429,6 +431,15 @@ func (b *Broker) PullMessageHandler(body []byte, conn net.Conn, requestId string
 
 ReturnPullMessageData:
 
+	// 记录队列的下发偏移量
+	if record, err := b.topicRouteManager.GetTopicTableRecord(topicName, consumerGroupName, queueId, clientId); err != nil {
+		Log.Infof("CheckReBalanceAndSetClientFlag - [error: %v]", err)
+		return
+	} else {
+		if maxSendOffset > record.maxSendOffset {
+			record.maxSendOffset = maxSendOffset
+		}
+	}
 	responseData.Size = int32(len(responseData.Messages))
 	if bytes, err := proto.Marshal(&responseData); err != nil {
 		Log.Infof("PullMessageHandler error: %v", err)
@@ -506,6 +517,9 @@ func (b *Broker) init() {
 	// 设置日志级别为 Debug，并将日志输出到标准输出
 	Log.SetLevel(LogLevel)
 	Log.SetOutput(os.Stdout)
+	Log.SetFormatter(&log.TextFormatter{
+		TimestampFormat: "2006-01-02 15:04:05.000",
+	})
 	//Log.SetReportCaller(true)
 
 	// 初始化commitLog引擎
@@ -630,27 +644,27 @@ func (b *Broker) GetClient(topicName string, consumerGroupName string, clientId 
 }
 
 func (b *Broker) reBalance(topicName string, consumerGroupName string) {
+	b.reBalanceLock.Lock()
 	key := b.GetReBalanceKey(topicName, consumerGroupName)
 	b.reBalanceMap[key] = true
+	b.reBalanceLock.Unlock()
 }
 
 // 重新分配队列
-// 能不能每一个消费组创建一个自动平台的goroutine呢
+// 消费组维度
 func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 	Log.Infof("开启消费组的平衡协程 %s %s", topicName, consumerGroupName)
 	for {
+		// 先上锁
+		b.reBalanceLock.Lock()
 		Log.Debugf("doReBalance - 检测[topic:%s][consumerGroupName:%s]", topicName, consumerGroupName)
 		key := b.GetReBalanceKey(topicName, consumerGroupName)
-		if flag, ok := b.reBalanceMap[key]; !ok {
+		// 如果标识位为false，就继续自旋，但是标识位可能会存在并发的情况，让准备
+		if flag, ok := b.reBalanceMap[key]; !ok || !flag {
+			b.reBalanceLock.Unlock()
 			time.Sleep(3 * time.Second)
 			continue
-		} else {
-			if !flag {
-				time.Sleep(3 * time.Second)
-				continue
-			}
 		}
-
 		// 判断是否拿到所有的锁
 		records := b.topicRouteManager.GetAllConsumerGroupRecord(topicName, consumerGroupName)
 		if len(records) > 0 {
@@ -661,6 +675,7 @@ func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 				}
 			}
 			if !ok {
+				b.reBalanceLock.Unlock()
 				time.Sleep(3 * time.Second)
 				continue
 			}
@@ -678,6 +693,7 @@ func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 		topicRouteRecordsSize := len(records)
 		clientsSize := len(clients)
 		if clientsSize < 1 {
+			b.reBalanceLock.Unlock()
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -704,6 +720,7 @@ func (b *Broker) doReBalance(topicName string, consumerGroupName string) {
 
 		// 平衡之后
 		b.reBalanceMap[key] = false
+		b.reBalanceLock.Unlock()
 	}
 
 }
@@ -741,4 +758,16 @@ func (b *Broker) RemoveClient(clientId string) error {
 		}
 	}
 	return nil
+}
+
+func (b *Broker) CheckReBalanceAndSetClientFlag(topic string, group string, qid int32, clientId string) {
+	if record, err := b.topicRouteManager.GetTopicTableRecord(topic, group, qid, clientId); err != nil {
+		Log.Infof("CheckReBalanceAndSetClientFlag - [error: %v]", err)
+		return
+	} else {
+		key := b.GetReBalanceKey(topic, group)
+		if flag, ok := b.reBalanceMap[key]; ok && flag == true {
+			record.clientId = ReBalance
+		}
+	}
 }
